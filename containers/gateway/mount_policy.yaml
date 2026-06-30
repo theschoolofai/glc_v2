@@ -1,0 +1,67 @@
+# Gateway container mount policy.
+#
+# The gateway is the trust boundary. It needs broader access than
+# adapters: persistent DBs, the LLM provider secret bundle, the
+# install token, and outbound network access to LLM providers.
+
+component: gateway
+runs_as: trusted   # the gateway is in the trust boundary; adapters are not
+
+filesystem:
+  read_only_mounts:
+    - source: ./glc/policy/policy.yaml
+      target: /etc/glc/policy.yaml
+    - source: ./glc/channels.yaml
+      target: /etc/glc/channels.yaml
+    - source: ./glc/agent_routing.yaml
+      target: /etc/glc/agent_routing.yaml
+  read_write_mounts:
+    - volume: glc-audit         # Modal Volume name
+      target: /data/audit.sqlite
+    - volume: glc-pairings
+      target: /data/pairings.sqlite
+    - volume: glc-gateway
+      target: /data/gateway.sqlite
+  tmpfs:
+    - target: /tmp
+      size_mb: 64
+
+network:
+  egress_allowlist:
+    # Worker LLM providers (gateway needs all; adapters need none)
+    - generativelanguage.googleapis.com   # Gemini
+    - api.groq.com                        # Groq
+    - api.cerebras.ai
+    - integrate.api.nvidia.com
+    - openrouter.ai
+    - models.github.ai
+    - localhost                           # Ollama if locally configured
+    # No image fetching for HTTP image URLs — closed via app-layer
+    # allowlist in routes/chat.py if you extend. Add hosts here only
+    # when you genuinely need them.
+
+secrets:
+  - name: glc-install-token        # Modal Secret name
+    keys: [GLC_INSTALL_TOKEN]
+  - name: glc-creds-signing-key    # signs per-tool credential JWTs
+    keys: [GLC_CREDS_SIGNING_KEY]
+  - name: glc-llm-keys             # all LLM provider keys, gateway-only
+    keys:
+      - GEMINI_API_KEY
+      - GROQ_API_KEY
+      - CEREBRAS_API_KEY
+      - NVIDIA_API_KEY
+      - OPEN_ROUTER_API_KEY
+      - GITHUB_ACCESS_TOKEN
+      - OLLAMA_MODEL              # optional
+
+resources:
+  cpu: 1.0
+  memory_mb: 1024
+  timeout_seconds: 300
+
+# The gateway exposes ports publicly. Modal routes a stable URL to this
+# container; adapters connect over WebSocket to that URL.
+expose:
+  - port: 8111
+    public: true

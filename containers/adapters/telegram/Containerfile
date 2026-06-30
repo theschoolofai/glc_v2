@@ -1,0 +1,76 @@
+# Telegram adapter container.
+#
+# This is the per-adapter template. The other 21 adapter containers
+# follow the same shape — copy this file and edit the COPY paths to
+# point at the adapter's owned directory.
+#
+# The adapter image contains ONLY:
+#   - the adapter's owned-paths code (glc/channels/catalogue/telegram/)
+#   - the channel base + envelope from the gateway package
+#   - the per-tool credentials client (glc/creds/client.py)
+#   - python-telegram-bot as the runtime dependency
+#
+# It does NOT contain:
+#   - other adapters' code
+#   - the gateway's routes, policy engine, audit log, pairing store
+#   - any LLM provider keys
+#   - any binary beyond what python-telegram-bot needs
+
+FROM python:3.11-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
+
+WORKDIR /build
+
+# Adapter-specific dependencies live in this Containerfile, not in the
+# top-level pyproject. Adapters are independent units; only the gateway
+# pulls the full dependency tree.
+RUN uv venv /build/.venv \
+    && /build/.venv/bin/pip install --no-cache-dir \
+        python-telegram-bot==21.6 \
+        httpx==0.27.2 \
+        pydantic==2.9.2 \
+        pyjwt==2.9.0
+
+# Copy ONLY the slot's owned paths plus the gateway primitives the
+# adapter is allowed to import.
+COPY glc/channels/__init__.py /build/glc/channels/__init__.py
+COPY glc/channels/base.py /build/glc/channels/base.py
+COPY glc/channels/envelope.py /build/glc/channels/envelope.py
+COPY glc/channels/catalogue/__init__.py /build/glc/channels/catalogue/__init__.py
+COPY glc/channels/catalogue/telegram/ /build/glc/channels/catalogue/telegram/
+COPY glc/creds/__init__.py /build/glc/creds/__init__.py
+COPY glc/creds/client.py /build/glc/creds/client.py
+COPY glc/__init__.py /build/glc/__init__.py
+
+
+FROM python:3.11-slim AS runtime
+
+RUN rm -rf /var/lib/apt/lists/* /var/cache/apt /usr/share/man /usr/share/doc
+
+# Non-root. The adapter's UID is 10001 — same as the gateway's — but
+# the container's user namespace is distinct, so the overlap doesn't
+# bridge anything.
+RUN groupadd -g 10001 telegram && useradd -u 10001 -g telegram -d /app -s /bin/sh telegram
+
+WORKDIR /app
+COPY --from=builder --chown=telegram:telegram /build/.venv ./.venv
+COPY --from=builder --chown=telegram:telegram /build/glc ./glc
+
+USER telegram
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
+# GLC_GATEWAY_URL is injected at deploy time, pointing at the gateway's
+# Modal URL. The adapter reaches the gateway over the network.
+# GLC_CONTAINER_IDENTITY is the adapter's per-deploy identity token.
+# Both come from Modal Secrets bound at deploy time.
+
+# Each adapter is a long-running process that connects to the gateway's
+# WS /v1/channels/telegram and to Telegram's Bot API. The entrypoint is
+# the adapter's __main__ (defined as part of the student's adapter code).
+CMD ["python", "-m", "glc.channels.catalogue.telegram"]
+
+LABEL org.opencontainers.image.source="https://github.com/theschoolofai/glc_v2"
+LABEL org.opencontainers.image.title="glc-adapter-telegram"
+LABEL org.opencontainers.image.licenses="MIT"

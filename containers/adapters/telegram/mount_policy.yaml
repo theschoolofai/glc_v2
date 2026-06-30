@@ -1,0 +1,47 @@
+# Telegram adapter mount policy.
+#
+# Per-adapter template. Modal deploy reads this and binds:
+#   - egress allowlist to network rules
+#   - secrets to env vars
+#   - filesystem mounts to nothing (adapters write nothing to disk)
+#
+# Students extending this for their own adapter: edit the channel
+# endpoints and the secret keys. Do not add to the read-write mounts
+# without a strong reason.
+
+slot: telegram
+group: "Telegram"   # cross-referenced against GROUPS.md
+
+filesystem:
+  read_only_mounts: []     # adapter reads no host files
+  read_write_mounts: []    # adapter writes no host files
+  tmpfs:
+    - target: /tmp
+      size_mb: 32          # scratch for temporary downloads
+
+network:
+  egress_allowlist:
+    - api.telegram.org           # Telegram Bot API
+    - core.telegram.org          # rarely needed, included for docs lookups
+    - $GLC_GATEWAY_URL           # the gateway's Modal URL, injected at deploy
+
+secrets:
+  - name: telegram-channel-secret
+    keys:
+      - TELEGRAM_BOT_TOKEN       # only this channel's credential
+  - name: telegram-container-identity
+    keys:
+      - GLC_CONTAINER_IDENTITY   # adapter's identity to the gateway
+
+# The adapter never sees LLM provider keys. When it needs to call the
+# LLM, it requests a per-tool token from the gateway's POST /v1/creds/issue
+# endpoint, using GLC_CONTAINER_IDENTITY for authentication.
+
+resources:
+  cpu: 0.25
+  memory_mb: 256
+  timeout_seconds: 600
+
+# Adapters do not expose ports. They open outbound connections to
+# Telegram + the gateway and consume messages.
+expose: []

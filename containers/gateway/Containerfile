@@ -1,0 +1,66 @@
+# GLC v2 gateway container.
+#
+# Same image format works for:
+#   - Apple Container (macOS 26+): container build -f Containerfile -t glc-gateway .
+#   - Docker:                        docker build -f Containerfile -t glc-gateway .
+#   - Podman:                        podman build -f Containerfile -t glc-gateway .
+#   - Modal:                         consumed by containers/gateway/modal_deploy.py
+#
+# Multi-stage build. Final image has no compiler, no shell beyond /bin/sh,
+# no curl, no editor. ~180MB.
+
+FROM python:3.11-slim AS builder
+
+# uv is the package resolver. ~30MB self-contained binary.
+COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
+
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY glc/ ./glc/
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev
+
+
+FROM python:3.11-slim AS runtime
+
+# Strip the runtime image down. No apt cache, no manpages, no compilers.
+RUN rm -rf /var/lib/apt/lists/* /var/cache/apt /usr/share/man /usr/share/doc
+
+# Non-root user. The gateway runs as 'glc' with UID 10001.
+# Adapters running in OTHER containers also run as glc:10001 but in
+# separate namespaces so the UID overlap is cosmetic.
+RUN groupadd -g 10001 glc && useradd -u 10001 -g glc -d /app -s /bin/sh glc
+
+WORKDIR /app
+COPY --from=builder --chown=glc:glc /build/.venv ./.venv
+COPY --from=builder --chown=glc:glc /build/glc ./glc
+
+# Volume mount points. The Modal deploy script binds Modal Volumes here.
+RUN mkdir -p /data /etc/glc \
+    && chown -R glc:glc /data /etc/glc
+
+USER glc
+
+# The audit DB and pairings DB live on Modal Volumes mounted at /data.
+# The install token and signing key for per-tool creds come from Modal
+# Secrets and land in env vars. The config dir is mounted read-only.
+ENV GLC_AUDIT_DB=/data/audit.sqlite \
+    GLC_PAIRING_DB=/data/pairings.sqlite \
+    GLC_GATEWAY_DB=/data/gateway.sqlite \
+    GLC_CONFIG_DIR=/etc/glc \
+    GLC_PORT=8111 \
+    PATH="/app/.venv/bin:${PATH}"
+
+EXPOSE 8111
+
+# Modal invokes the ASGI app directly via @modal.asgi_app(); this CMD
+# is only used for local `container run` testing.
+CMD ["python", "-m", "uvicorn", "glc.main:app", "--host", "0.0.0.0", "--port", "8111"]
+
+# OCI labels for traceability
+LABEL org.opencontainers.image.source="https://github.com/theschoolofai/glc_v2"
+LABEL org.opencontainers.image.title="glc-gateway"
+LABEL org.opencontainers.image.description="GLC v2 gateway. Session 12 of EAG V3."
+LABEL org.opencontainers.image.licenses="MIT"

@@ -1,0 +1,128 @@
+name: Adapter PR
+
+on:
+  pull_request:
+    paths:
+      - 'glc/channels/catalogue/**'
+      - 'glc/voice/stt/providers/**'
+      - 'glc/voice/tts/providers/**'
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: Boundary check
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          uv run python scripts/check_pr_boundaries.py \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}" \
+            --pr-body "$PR_BODY"
+
+  test-changed-slot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync
+      - id: changed
+        name: Detect changed slots
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          channels=$(git diff --name-only "$base" "$head" \
+              | awk -F/ '/^glc\/channels\/catalogue\// {print $4}' \
+              | sort -u | tr '\n' ' ')
+          stt=$(git diff --name-only "$base" "$head" \
+              | awk -F/ '/^glc\/voice\/stt\/providers\// {print $5}' \
+              | sort -u | tr '\n' ' ')
+          tts=$(git diff --name-only "$base" "$head" \
+              | awk -F/ '/^glc\/voice\/tts\/providers\// {print $5}' \
+              | sort -u | tr '\n' ' ')
+          echo "channels=$channels" >> "$GITHUB_OUTPUT"
+          echo "stt=$stt"           >> "$GITHUB_OUTPUT"
+          echo "tts=$tts"           >> "$GITHUB_OUTPUT"
+          echo "Channels: $channels  STT: $stt  TTS: $tts"
+      - name: Test changed channel adapters
+        if: steps.changed.outputs.channels != ''
+        run: |
+          set -e
+          for ch in ${{ steps.changed.outputs.channels }}; do
+            echo "==> tests/channels/test_${ch}.py"
+            uv run pytest "tests/channels/test_${ch}.py" -v
+          done
+      - name: Test changed STT providers
+        if: steps.changed.outputs.stt != ''
+        run: |
+          set -e
+          for p in ${{ steps.changed.outputs.stt }}; do
+            echo "==> tests/voice/stt/test_${p}.py"
+            uv run pytest "tests/voice/stt/test_${p}.py" -v
+          done
+      - name: Test changed TTS providers
+        if: steps.changed.outputs.tts != ''
+        run: |
+          set -e
+          for p in ${{ steps.changed.outputs.tts }}; do
+            echo "==> tests/voice/tts/test_${p}.py"
+            uv run pytest "tests/voice/tts/test_${p}.py" -v
+          done
+      - name: Lint and type-check the changed slot
+        if: steps.changed.outputs.channels != '' || steps.changed.outputs.stt != '' || steps.changed.outputs.tts != ''
+        run: |
+          set -e
+          for ch in ${{ steps.changed.outputs.channels }}; do
+            uv run ruff check "glc/channels/catalogue/${ch}/"
+            uv run mypy "glc/channels/catalogue/${ch}/" || true
+          done
+          for p in ${{ steps.changed.outputs.stt }}; do
+            uv run ruff check "glc/voice/stt/providers/${p}/"
+            uv run mypy "glc/voice/stt/providers/${p}/" || true
+          done
+          for p in ${{ steps.changed.outputs.tts }}; do
+            uv run ruff check "glc/voice/tts/providers/${p}/"
+            uv run mypy "glc/voice/tts/providers/${p}/" || true
+          done
+
+  scorecard:
+    runs-on: ubuntu-latest
+    needs: test-changed-slot
+    if: always() && github.event.pull_request.state == 'open'
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: Generate scorecard
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          uv run python scripts/scorecard.py \
+            --pr-body "$PR_BODY" \
+            --pr-number "${{ github.event.pull_request.number }}" \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}" \
+            > scorecard.md
+          cat scorecard.md
+      - name: Post scorecard comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file scorecard.md
