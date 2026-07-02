@@ -1,0 +1,50 @@
+name: Scoreboard
+
+# Regenerate the pen-test leaderboard whenever a security finding is filed,
+# triaged, or resolved. generate.py reads issues tagged `security` via the
+# `gh` CLI and writes pentest/scoreboard/index.html. The regenerated page is
+# committed back to the default branch only when it actually changes.
+#
+# No auto-merge, no destructive steps: this workflow only commits the one
+# generated HTML file.
+
+on:
+  issues:
+    types: [opened, edited, deleted, closed, reopened, labeled, unlabeled]
+  workflow_dispatch:
+
+# Serialise runs so two rapid issue events can't race on the commit.
+concurrency:
+  group: scoreboard
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # to commit the regenerated index.html
+  issues: read      # gh issue list
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Regenerate scoreboard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python pentest/scoreboard/generate.py
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- pentest/scoreboard/index.html; then
+            echo "No scoreboard change; nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pentest/scoreboard/index.html
+          git commit -m "chore(scoreboard): regenerate leaderboard"
+          git push
