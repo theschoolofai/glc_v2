@@ -34,12 +34,19 @@ router = APIRouter()
 
 @router.websocket("/v1/channels/{name}")
 async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+    # Reject tokens supplied via query string (?token=...). The query string
+    # is logged verbatim by every reverse proxy and access log, which would
+    # silently leak the install token to anyone with log access (finding C3,
+    # invariant 2). Adapters must send the token in the Authorization header.
+    # We close before accept() so the rejection itself does not log a token.
+    if token is not None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
-        presented = token
     expected = get_or_create_install_token()
     if presented is None or not hmac.compare_digest(presented, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
