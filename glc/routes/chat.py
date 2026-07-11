@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -536,7 +539,8 @@ async def chat(req: ChatRequest, request: Request):
                             session=req.session,
                             retries=retries,
                         )
-                        yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
+                        _log.error("streaming chat error provider=%s: %s", name, e)
+                        yield f"data: {json.dumps({'error': 'upstream provider error'})}\n\n"
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -670,7 +674,8 @@ async def chat(req: ChatRequest, request: Request):
                 tag += f" → backoff {secs:.0f}s ({reason})"
             all_attempts.append({"provider": name, "reason": tag})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                _log.error("provider %s non-retryable error: %s", name, e)
+                raise HTTPException(502, "upstream provider error")
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
@@ -695,11 +700,13 @@ async def chat(req: ChatRequest, request: Request):
             )
             all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                _log.error("provider %s explicit override error: %s", name, e)
+                raise HTTPException(502, "upstream provider error")
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    _log.error("all providers unavailable; attempts=%s last_error=%s", all_attempts, last_err)
+    raise HTTPException(503, "service temporarily unavailable — all providers exhausted")
 
 
 @router.post("/v1/chat/batch")
@@ -775,13 +782,14 @@ async def embed(req: EmbedRequest, request: Request):
             override=req.provider,
             call_role="embed",
         )
+        _log.error("embed error provider=%s status=%s: %s", req.provider, e.status, e)
         if req.provider:
             if e.status == 429:
-                raise HTTPException(429, f"{req.provider} rate-limited: {e}")
+                raise HTTPException(429, "rate limit exceeded — try again later")
             if e.status == 400:
-                raise HTTPException(400, str(e))
-            raise HTTPException(502, f"{req.provider} embed failed: {e}")
-        raise HTTPException(503, str(e))
+                raise HTTPException(400, "invalid embed request")
+            raise HTTPException(502, "upstream embed provider error")
+        raise HTTPException(503, "service temporarily unavailable — no embed provider succeeded")
 
     db.log_call(
         provider=name,
