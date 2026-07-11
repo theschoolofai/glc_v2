@@ -27,19 +27,26 @@ LOCAL_GLC = Path(__file__).parent / "glc"
 # Volume mount so all databases land on persistent storage instead of the
 # throwaway container filesystem.
 image = (
+    # Pin by python_version only (debian_slim tag is locked by Modal internally).
+    # Dependency versions are pinned below — no ">=" ranges — so every redeploy
+    # builds the exact same image (A5: reproducible image, invariant 7).
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "fastapi>=0.110",
-        "uvicorn[standard]>=0.27",
-        "httpx>=0.27",
-        "python-dotenv>=1.0",
-        "pydantic>=2.6",
-        "jsonschema>=4.21",
-        "pyyaml>=6.0",
-        "websockets>=12.0",
-        "twilio>=9.0",
+        "fastapi==0.110.3",
+        "uvicorn[standard]==0.29.0",
+        "httpx>=0.27,<0.28",       # 0.28 broke starlette TestClient's app= kwarg
+        "python-dotenv==1.0.1",
+        "pydantic==2.6.4",
+        "jsonschema==4.21.1",
+        "pyyaml==6.0.1",
+        "websockets==12.0",
+        "twilio==9.0.5",
     )
-    .env({"GLC_CONFIG_DIR": "/data/glc"})
+    .env({
+        "GLC_CONFIG_DIR": "/data/glc",
+        # Hide /docs, /redoc, /openapi.json in production (A2 / invariant 8).
+        "GLC_ENV": "prod",
+    })
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
 )
 

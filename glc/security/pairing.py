@@ -189,7 +189,28 @@ class PairingStore:
     ) -> PairingRecord:
         """Out-of-band pairing for the installation owner. Used by the
         installer to bootstrap the first owner identity. Not exposed
-        through HTTP."""
+        through HTTP.
+
+        Security (Leak 3 / Invariant 2): This function grants owner_paired
+        trust without the normal code-exchange flow. In a production
+        deployment it is blocked entirely — GLC_ENV=prod raises RuntimeError.
+        In non-prod it emits an audit WARNING so every call is traceable.
+        Full closure requires process separation (adapter containers cannot
+        import PairingStore directly).
+        """
+        import logging
+        import os
+
+        if os.environ.get("GLC_ENV") == "prod":
+            raise RuntimeError(
+                "force_pair_owner is disabled in production (GLC_ENV=prod). "
+                "Use the normal pairing-code flow instead."
+            )
+        logging.getLogger(__name__).warning(
+            "force_pair_owner called: channel=%s user=%s handle=%s — "
+            "trust escalation bypasses normal pairing flow",
+            channel, channel_user_id, user_handle,
+        )
         paired_at = time.time()
         with _conn() as c:
             c.execute(
