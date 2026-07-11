@@ -17,7 +17,14 @@ import pytest
 from glc.channels.catalogue.imap.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
-from tests.channels.mocks.imap_mock import OWNER_ID, STRANGER_ID, ImapMock
+from tests.channels.mocks.imap_mock import OWNER_ID, STRANGER_ID, TRUSTED_AUTHSERV_ID, ImapMock
+
+
+@pytest.fixture(autouse=True)
+def trusted_authserv(monkeypatch):
+    """Stands in for the operator configuring GLC_IMAP_TRUSTED_AUTHSERV_ID to
+    match their real receiving MTA's authserv-id."""
+    monkeypatch.setenv("GLC_IMAP_TRUSTED_AUTHSERV_ID", TRUSTED_AUTHSERV_ID)
 
 
 @pytest.fixture
@@ -44,6 +51,33 @@ async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
     assert msg.trust_level == "owner_paired"
     assert "hello from owner" in (msg.text or "")
     assert isinstance(msg.arrived_at, datetime)
+
+
+@pytest.mark.asyncio
+async def test_on_message_forged_owner_sender_stays_untrusted(mock, pair_owner):
+    """A `From: <owner>` message with no valid Authentication-Results
+    verdict is the forged-sender attack: anyone can set the From header to
+    the paired owner's address. It must NOT be granted owner_paired trust
+    just because the pairing store has that address on file."""
+    adapter = Adapter(config={"mock": mock})
+    ev = mock.queue_spoofed_owner_message("gimme owner trust")
+    msg = await adapter.on_message(ev)
+    assert msg is not None
+    assert msg.channel_user_id == OWNER_ID
+    assert msg.trust_level == "untrusted"
+
+
+@pytest.mark.asyncio
+async def test_on_message_unconfigured_authserv_id_fails_closed(mock, pair_owner, monkeypatch):
+    """No trusted authserv-id configured at all must never fall back to
+    trusting From: outright — even a genuinely-authenticated message stays
+    untrusted until the operator configures GLC_IMAP_TRUSTED_AUTHSERV_ID."""
+    monkeypatch.delenv("GLC_IMAP_TRUSTED_AUTHSERV_ID", raising=False)
+    adapter = Adapter(config={"mock": mock})
+    ev = mock.queue_owner_message("hello from owner")
+    msg = await adapter.on_message(ev)
+    assert msg is not None
+    assert msg.trust_level == "untrusted"
 
 
 @pytest.mark.asyncio

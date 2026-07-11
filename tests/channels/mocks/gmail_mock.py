@@ -41,13 +41,28 @@ STRANGER_ID = STRANGER_EMAIL
 
 BOT_EMAIL = "bot@example.com"
 
+# Trusted authserv-id these tests configure via GLC_GMAIL_TRUSTED_AUTHSERV_ID,
+# standing in for "the hostname Google's real receiving MTA stamps."
+TRUSTED_AUTHSERV_ID = "mx.google.com"
 
-def _build_multipart(*, from_addr: str, to_addr: str, subject: str, text_body: str, html_body: str) -> bytes:
+
+def _build_multipart(
+    *,
+    from_addr: str,
+    to_addr: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+    authenticated: bool = False,
+) -> bytes:
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Date"] = "Wed, 17 Jun 2026 12:00:00 +0000"
+    if authenticated:
+        domain = from_addr.rsplit("@", 1)[-1]
+        msg["Authentication-Results"] = f"{TRUSTED_AUTHSERV_ID}; dkim=pass header.d={domain}; spf=neutral"
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
     return bytes(msg)
@@ -98,7 +113,7 @@ class GmailMock:
         }
         self._history.setdefault(history_id, []).append(message_id)
 
-    def _seed_message(self, *, from_addr: str, text: str) -> tuple[str, int]:
+    def _seed_message(self, *, from_addr: str, text: str, authenticated: bool = False) -> tuple[str, int]:
         msg_id = self._m()
         history_id = self._h()
         raw = _build_multipart(
@@ -107,12 +122,22 @@ class GmailMock:
             subject="ping",
             text_body=text,
             html_body=f"<p>{text}</p><p>--<br>(html part the adapter must ignore)</p>",
+            authenticated=authenticated,
         )
         self.register_message(msg_id, raw, from_addr, history_id)
         return msg_id, history_id
 
     def queue_owner_message(self, text: str = "hello") -> dict[str, Any]:
-        msg_id, history_id = self._seed_message(from_addr=OWNER_EMAIL, text=text)
+        msg_id, history_id = self._seed_message(from_addr=OWNER_EMAIL, text=text, authenticated=True)
+        ev = _pubsub_push(email_address=BOT_EMAIL, history_id=history_id, message_id=msg_id)
+        self.inbound_events.append(ev)
+        return ev
+
+    def queue_spoofed_owner_message(self, text: str = "hello") -> dict[str, Any]:
+        """A `From: <owner>` message with no MTA Authentication-Results
+        verdict — the forged-sender attack this fix closes. Must classify
+        as untrusted despite the From match."""
+        msg_id, history_id = self._seed_message(from_addr=OWNER_EMAIL, text=text, authenticated=False)
         ev = _pubsub_push(email_address=BOT_EMAIL, history_id=history_id, message_id=msg_id)
         self.inbound_events.append(ev)
         return ev

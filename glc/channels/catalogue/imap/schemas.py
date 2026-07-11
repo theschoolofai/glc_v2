@@ -75,6 +75,9 @@ class ParsedEmail(BaseModel):
     )
     references: str | None = None  # References header (thread chain)
     in_reply_to: str | None = None  # In-Reply-To header
+    auth_results_headers: list[str] = Field(  # raw Authentication-Results header values
+        default_factory=list
+    )
 
 
 class OutboundPayload(BaseModel):

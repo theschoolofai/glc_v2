@@ -161,6 +161,7 @@ def parse(raw_bytes: bytes) -> ParsedEmail | None:
     message_id = (msg.get("Message-ID") or "").strip() or None
     references = (msg.get("References") or "").strip() or None
     in_reply_to = (msg.get("In-Reply-To") or "").strip() or None
+    auth_results_headers = list(msg.get_all("Authentication-Results", []) or [])
 
     # Body
     plain, html = _walk_text(msg)
@@ -180,4 +181,5 @@ def parse(raw_bytes: bytes) -> ParsedEmail | None:
         attachments=attachments,
         references=references,
         in_reply_to=in_reply_to,
+        auth_results_headers=auth_results_headers,
     )
