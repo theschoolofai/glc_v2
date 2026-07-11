@@ -286,8 +286,47 @@ def _required_caps(req: ChatRequest):
     return caps
 
 
+_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap — protects against OOM via huge images
+_MAX_REDIRECTS = 5
+
+
+def _assert_public_host(host: str, original_url: str) -> None:
+    """Resolve *host* to IP addresses and reject any that are non-public.
+
+    Blocks loopback (127.x, ::1), private RFC-1918/RFC-4193 ranges, link-local
+    (169.254.x.x, fe80::/10), cloud-metadata (169.254.169.254), reserved,
+    multicast, and unspecified addresses for both IPv4 and IPv6.
+    This is re-called after every redirect hop so a chain that starts at a
+    public host and redirects to an internal one is also caught.
+    """
+    import ipaddress
+    import socket
+
+    try:
+        results = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise HTTPException(400, f"image url {original_url!r}: cannot resolve host {host!r}: {exc}")
+
+    for *_, sockaddr in results:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise HTTPException(
+                400,
+                f"image url {original_url!r}: host {host!r} resolves to a "
+                f"non-public address ({ip}) — SSRF protection",
+            )
+
+
 async def _resolve_image_urls(messages):
     import base64
+    from urllib.parse import urlparse
 
     import httpx as _httpx
 
@@ -296,15 +335,40 @@ async def _resolve_image_urls(messages):
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        current_url = url
+        # Follow redirects manually so we can re-validate each hop's host.
+        async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
+            for hop in range(_MAX_REDIRECTS + 1):
+                parsed = urlparse(current_url)
+                if parsed.scheme not in ("http", "https"):
+                    raise HTTPException(400, f"image url {url!r}: only http/https allowed")
+                _assert_public_host(parsed.hostname or "", url)
+                try:
+                    r = await c.get(current_url)
+                except _httpx.HTTPError as e:
+                    raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+                if r.status_code in (301, 302, 303, 307, 308):
+                    location = r.headers.get("location", "")
+                    if not location:
+                        raise HTTPException(400, f"image url {url!r}: redirect with no Location header")
+                    if hop == _MAX_REDIRECTS:
+                        raise HTTPException(400, f"image url {url!r}: too many redirects")
+                    current_url = location
+                    continue
+                try:
+                    r.raise_for_status()
+                except _httpx.HTTPError as e:
+                    raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+                # Cap response size to prevent OOM via a giant image.
+                content = b""
+                async for chunk in r.aiter_bytes(chunk_size=65536):
+                    content += chunk
+                    if len(content) > _IMAGE_MAX_BYTES:
+                        raise HTTPException(400, f"image url {url!r}: response exceeds {_IMAGE_MAX_BYTES // 1024 // 1024} MB limit")
+                mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+                b64 = base64.b64encode(content).decode()
+                return f"data:{mt};base64,{b64}"
+        raise HTTPException(400, f"image url {url!r}: too many redirects")
 
     out = []
     for m in messages:
