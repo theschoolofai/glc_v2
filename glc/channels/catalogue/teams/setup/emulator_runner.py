@@ -14,13 +14,17 @@ Flags::
 
     --host          Bind address (default 127.0.0.1)
     --port          Port to listen on (default 3978 — BF Emulator default)
-    --no-emulator   Skip Bot Framework JWT auth check (headless curl / CI testing)
+    --no-emulator   Skip Bot Framework JWT auth check (headless curl / CI testing
+                     ONLY — never pass this in a deployment reachable from the
+                     internet, it disables the one check that proves a request
+                     came from the real Bot Framework Connector)
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +33,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from glc.channels.catalogue.teams.adapter import Adapter
+from glc.channels.catalogue.teams.auth import TeamsAuthError, verify_bot_framework_jwt
 from glc.channels.envelope import ChannelReply
 
 _LOG = logging.getLogger(__name__)
@@ -59,6 +64,18 @@ def build_app(*, no_emulator: bool = False) -> FastAPI:
 
     @app.post("/api/messages")
     async def handle_messages(request: Request) -> JSONResponse:
+        if not no_emulator:
+            auth_header = request.headers.get("authorization", "")
+            scheme, _, token = auth_header.partition(" ")
+            if scheme.lower() != "bearer" or not token:
+                return JSONResponse(status_code=401, content={"error": "missing bearer token"})
+            app_id = os.environ.get("TEAMS_APP_ID", "")
+            try:
+                verify_bot_framework_jwt(token, app_id=app_id)
+            except TeamsAuthError as exc:
+                _LOG.warning("rejected inbound Activity: %s", exc)
+                return JSONResponse(status_code=401, content={"error": "invalid bearer token"})
+
         try:
             activity: dict[str, Any] = await request.json()
         except Exception:
