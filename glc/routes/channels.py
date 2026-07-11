@@ -66,6 +66,21 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            # Reject envelopes that claim to come from a different channel than
+            # the one this WebSocket was opened on. Without this check an adapter
+            # authenticated on /v1/channels/telegram could send env.channel="discord"
+            # and borrow Discord's owner list, allowlist, and audit trail (leak 9).
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="channel_spoof_attempt",
+                    result={"declared": env.channel, "route": name},
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
@@ -148,6 +163,18 @@ async def channel_webhook(name: str, request: Request):
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
     owners = [p.channel_user_id for p in pairings.owners(channel=name)]
+
+    # Reject if the adapter-parsed envelope claims a different channel than
+    # the route it arrived on (same invariant 2 / leak 9 check as the WS path).
+    if msg.channel != name:
+        audit_append(
+            channel=name,
+            channel_user_id=msg.channel_user_id,
+            trust_level=msg.trust_level,
+            event_type="channel_spoof_attempt",
+            result={"declared": msg.channel, "route": name},
+        )
+        return {"status": "ok"}
 
     ok, why = allowed(
         msg.channel,
