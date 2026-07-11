@@ -28,6 +28,7 @@ from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
+from glc.security.trust_level import classify
 
 router = APIRouter()
 
@@ -65,6 +66,17 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # The trust level is the gateway's determination of WHO the
+            # sender is; it must never be taken from the wire. A channel
+            # adapter sits on the low-trust side of the adapter->gateway
+            # boundary, so an envelope arriving with trust_level=owner_paired
+            # is an assertion by a lower-trust principal, not a fact. Re-derive
+            # it here from the pairing store — the same authoritative source
+            # every catalogue adapter calls classify() against — keyed by the
+            # route name (the channel this socket actually authenticated for),
+            # and override whatever the envelope claimed.
+            env.trust_level = classify(name, env.channel_user_id)
 
             ok, why = allowed(
                 env.channel,
