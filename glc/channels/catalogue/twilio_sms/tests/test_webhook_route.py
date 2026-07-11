@@ -45,14 +45,14 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("GLC_TWILIO_SKIP_SIG", raising=False)
 
 
-def _client_and_seen():
+def _client_and_seen(client_addr: tuple[str, int] = ("testclient", 50000)):
     seen: list[ChannelMessage] = []
 
     async def handle_message(msg):
         seen.append(msg)
 
     app = build_app(FakeAdapter(), handle_message)
-    return TestClient(app), seen
+    return TestClient(app, client=client_addr), seen
 
 
 def test_valid_signature_accepted_and_handled():
@@ -90,7 +90,9 @@ def test_missing_signature_rejected_403():
     assert seen == []
 
 
-def test_skip_sig_env_bypasses_verification(monkeypatch):
+def test_skip_sig_env_bypasses_verification_for_loopback_caller(monkeypatch):
+    # TestClient's request.client.host is the "testclient" sentinel — treated
+    # as loopback since there's no real socket in an in-process test.
     monkeypatch.setenv("GLC_TWILIO_SKIP_SIG", "1")
     client, seen = _client_and_seen()
     form = {"From": "+19999999999", "Body": "hi", "NumMedia": "0"}
@@ -99,6 +101,21 @@ def test_skip_sig_env_bypasses_verification(monkeypatch):
 
     assert resp.status_code == 200
     assert len(seen) == 1
+
+
+def test_skip_sig_env_does_not_bypass_verification_for_remote_caller(monkeypatch):
+    """A stale GLC_TWILIO_SKIP_SIG=1 left set in a shared/production env must
+    not let an internet caller forge webhooks — only loopback dev/CI callers
+    get the bypass. Real Twilio deliveries never originate from loopback, so
+    this makes the flag harmless outside local dev."""
+    monkeypatch.setenv("GLC_TWILIO_SKIP_SIG", "1")
+    client, seen = _client_and_seen(client_addr=("203.0.113.5", 12345))
+    form = {"From": "+19999999999", "Body": "hi", "NumMedia": "0"}
+
+    resp = client.post(WEBHOOK_PATH, data=form)  # no signature, from a "remote" caller
+
+    assert resp.status_code == 403
+    assert seen == []
 
 
 def test_artifact_route_serves_stored_bytes():

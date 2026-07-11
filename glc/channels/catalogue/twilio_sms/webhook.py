@@ -63,9 +63,26 @@ def validate_signature(auth_token: str, url: str, params: dict[str, Any], signat
     return hmac.compare_digest(expected, signature)
 
 
-def _skip_signature() -> bool:
-    """Local-dev escape hatch to bypass verification."""
-    return os.environ.get("GLC_TWILIO_SKIP_SIG", "").lower() in {"1", "true", "yes"}
+# Starlette's TestClient hardcodes this as request.client.host for in-process
+# tests (there is no real socket, so there is no real IP); treating it as
+# loopback lets the dev escape hatch keep working under pytest.
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _skip_signature(client_host: str | None) -> bool:
+    """Local-dev escape hatch to bypass verification.
+
+    Restricted to loopback callers so a stale GLC_TWILIO_SKIP_SIG=1 left set
+    in a shared/production environment cannot be used by an internet caller
+    to spoof Twilio webhooks (mirrors the loopback guard already used on
+    /v1/control/kill). Real Twilio webhook deliveries never originate from
+    loopback, so this makes the flag a no-op outside of local dev/CI.
+    """
+    if os.environ.get("GLC_TWILIO_SKIP_SIG", "").lower() not in {"1", "true", "yes"}:
+        return False
+    if os.getenv("GLC_TWILIO_SKIP_SIG_ALLOW_REMOTE") == "1":
+        return True
+    return client_host in _LOOPBACK_HOSTS
 
 
 async def gateway_roundtrip(
@@ -127,8 +144,9 @@ def build_app(
         auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
         signature = request.headers.get("X-Twilio-Signature")
         url = str(request.url)
+        client_host = request.client.host if request.client else None
 
-        if not _skip_signature() and not validate_signature(auth_token, url, form, signature):
+        if not _skip_signature(client_host) and not validate_signature(auth_token, url, form, signature):
             return Response(status_code=403, content="invalid signature")
 
         # Translate to the canonical envelope, then hand off. The gateway WS
