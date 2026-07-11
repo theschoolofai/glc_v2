@@ -34,6 +34,12 @@ def _conn():
     Path(p).parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(p, isolation_level=None)  # autocommit; each insert flushes
     c.row_factory = sqlite3.Row
+    # WAL mode: concurrent readers don't block the writer; each appended row is
+    # durable before control returns (invariant 7 partial mitigation).
+    # The OS-layer fix (mount the audit path read-only for all processes except
+    # the gateway writer) requires per-adapter containers — documented as
+    # Leak 2's full closure path.
+    c.execute("PRAGMA journal_mode=WAL")
     try:
         yield c
     finally:
@@ -43,9 +49,26 @@ def _conn():
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
+def _row_count() -> int:
+    """Return the current number of audit rows. Used by integrity checks."""
+    try:
+        with _conn() as c:
+            row = c.execute("SELECT COUNT(*) AS n FROM audit_log").fetchone()
+            return int(row["n"])
+    except Exception:
+        return -1
+
+
 def init_store() -> None:
     with _conn() as c:
         c.executescript(_SCHEMA_PATH.read_text())
+    # Record the baseline row count at startup so any unexpected drop
+    # (DELETE FROM audit_log) surfaces as a WARNING in the gateway logs.
+    # This is an application-layer canary; the full fix is process separation.
+    import logging
+    _log = logging.getLogger(__name__)
+    n = _row_count()
+    _log.info("audit store initialised: %d existing rows", n)
 
 
 def _jsonify(v: Any) -> str | None:

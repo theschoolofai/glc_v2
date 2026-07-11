@@ -12,18 +12,22 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
 
+_log = logging.getLogger(__name__)
+
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError
 
 from glc import db
 from glc import providers as P
+from glc.security.api_auth import check_rate_limit, consume_n_rate_limit_tokens, require_api_token
 from glc.llm_schemas import (
     BatchChatRequest,
     ChatRequest,
@@ -69,7 +73,7 @@ ROUTER_PROMPT = (
     "Output the single word and nothing else."
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_api_token), Depends(check_rate_limit)])
 
 
 # ─────────────────────────── helpers (verbatim port) ──────────────────────────
@@ -285,8 +289,47 @@ def _required_caps(req: ChatRequest):
     return caps
 
 
+_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap — protects against OOM via huge images
+_MAX_REDIRECTS = 5
+
+
+def _assert_public_host(host: str, original_url: str) -> None:
+    """Resolve *host* to IP addresses and reject any that are non-public.
+
+    Blocks loopback (127.x, ::1), private RFC-1918/RFC-4193 ranges, link-local
+    (169.254.x.x, fe80::/10), cloud-metadata (169.254.169.254), reserved,
+    multicast, and unspecified addresses for both IPv4 and IPv6.
+    This is re-called after every redirect hop so a chain that starts at a
+    public host and redirects to an internal one is also caught.
+    """
+    import ipaddress
+    import socket
+
+    try:
+        results = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise HTTPException(400, f"image url {original_url!r}: cannot resolve host {host!r}: {exc}")
+
+    for *_, sockaddr in results:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise HTTPException(
+                400,
+                f"image url {original_url!r}: host {host!r} resolves to a "
+                f"non-public address ({ip}) — SSRF protection",
+            )
+
+
 async def _resolve_image_urls(messages):
     import base64
+    from urllib.parse import urlparse
 
     import httpx as _httpx
 
@@ -295,15 +338,40 @@ async def _resolve_image_urls(messages):
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        current_url = url
+        # Follow redirects manually so we can re-validate each hop's host.
+        async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
+            for hop in range(_MAX_REDIRECTS + 1):
+                parsed = urlparse(current_url)
+                if parsed.scheme not in ("http", "https"):
+                    raise HTTPException(400, f"image url {url!r}: only http/https allowed")
+                _assert_public_host(parsed.hostname or "", url)
+                try:
+                    r = await c.get(current_url)
+                except _httpx.HTTPError as e:
+                    raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+                if r.status_code in (301, 302, 303, 307, 308):
+                    location = r.headers.get("location", "")
+                    if not location:
+                        raise HTTPException(400, f"image url {url!r}: redirect with no Location header")
+                    if hop == _MAX_REDIRECTS:
+                        raise HTTPException(400, f"image url {url!r}: too many redirects")
+                    current_url = location
+                    continue
+                try:
+                    r.raise_for_status()
+                except _httpx.HTTPError as e:
+                    raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+                # Cap response size to prevent OOM via a giant image.
+                content = b""
+                async for chunk in r.aiter_bytes(chunk_size=65536):
+                    content += chunk
+                    if len(content) > _IMAGE_MAX_BYTES:
+                        raise HTTPException(400, f"image url {url!r}: response exceeds {_IMAGE_MAX_BYTES // 1024 // 1024} MB limit")
+                mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+                b64 = base64.b64encode(content).decode()
+                return f"data:{mt};base64,{b64}"
+        raise HTTPException(400, f"image url {url!r}: too many redirects")
 
     out = []
     for m in messages:
@@ -471,7 +539,8 @@ async def chat(req: ChatRequest, request: Request):
                             session=req.session,
                             retries=retries,
                         )
-                        yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
+                        _log.error("streaming chat error provider=%s: %s", name, e)
+                        yield f"data: {json.dumps({'error': 'upstream provider error'})}\n\n"
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -605,7 +674,8 @@ async def chat(req: ChatRequest, request: Request):
                 tag += f" → backoff {secs:.0f}s ({reason})"
             all_attempts.append({"provider": name, "reason": tag})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                _log.error("provider %s non-retryable error: %s", name, e)
+                raise HTTPException(502, "upstream provider error")
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
@@ -630,15 +700,23 @@ async def chat(req: ChatRequest, request: Request):
             )
             all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                _log.error("provider %s explicit override error: %s", name, e)
+                raise HTTPException(502, "upstream provider error")
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    _log.error("all providers unavailable; attempts=%s last_error=%s", all_attempts, last_err)
+    raise HTTPException(503, "service temporarily unavailable — all providers exhausted")
 
 
 @router.post("/v1/chat/batch")
 async def chat_batch(req: BatchChatRequest, request: Request):
+    # The router-level check_rate_limit dependency already consumed 1 token
+    # for the HTTP request itself.  Consume (len-1) more so every inner LLM
+    # call counts against the caller's per-minute quota — prevents a single
+    # authenticated request from multiplying into N uncounted back-end calls.
+    consume_n_rate_limit_tokens(request, len(req.calls) - 1)
+
     sem = _asyncio.Semaphore(max(1, req.max_concurrency))
 
     async def _one(call: ChatRequest):
@@ -710,13 +788,14 @@ async def embed(req: EmbedRequest, request: Request):
             override=req.provider,
             call_role="embed",
         )
+        _log.error("embed error provider=%s status=%s: %s", req.provider, e.status, e)
         if req.provider:
             if e.status == 429:
-                raise HTTPException(429, f"{req.provider} rate-limited: {e}")
+                raise HTTPException(429, "rate limit exceeded — try again later")
             if e.status == 400:
-                raise HTTPException(400, str(e))
-            raise HTTPException(502, f"{req.provider} embed failed: {e}")
-        raise HTTPException(503, str(e))
+                raise HTTPException(400, "invalid embed request")
+            raise HTTPException(502, "upstream embed provider error")
+        raise HTTPException(503, "service temporarily unavailable — no embed provider succeeded")
 
     db.log_call(
         provider=name,
