@@ -125,12 +125,20 @@ class ChatResponse(BaseModel):
     retries: int = 0
 
 
+_MAX_BATCH_CALLS: int = 50  # hard cap; prevents one request from firing 1 000 LLM calls
+
+
 class BatchChatRequest(BaseModel):
     """V8 batch endpoint. The gateway dispatches the inner calls with
-    bounded parallelism so providers' rate limits are respected centrally."""
+    bounded parallelism so providers' rate limits are respected centrally.
 
-    calls: list[ChatRequest]
-    max_concurrency: int = 4
+    Security: ``calls`` is capped at _MAX_BATCH_CALLS items so a single
+    authenticated HTTP request cannot multiply into an arbitrarily large
+    number of back-end LLM calls, bypassing the per-IP rate limit.
+    """
+
+    calls: list[ChatRequest] = Field(max_length=_MAX_BATCH_CALLS)
+    max_concurrency: int = Field(default=4, ge=1, le=_MAX_BATCH_CALLS)
 
 
 class VisionRequest(BaseModel):

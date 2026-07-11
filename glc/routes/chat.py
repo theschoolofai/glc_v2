@@ -27,7 +27,7 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from glc import db
 from glc import providers as P
-from glc.security.api_auth import check_rate_limit, require_api_token
+from glc.security.api_auth import check_rate_limit, consume_n_rate_limit_tokens, require_api_token
 from glc.llm_schemas import (
     BatchChatRequest,
     ChatRequest,
@@ -711,6 +711,12 @@ async def chat(req: ChatRequest, request: Request):
 
 @router.post("/v1/chat/batch")
 async def chat_batch(req: BatchChatRequest, request: Request):
+    # The router-level check_rate_limit dependency already consumed 1 token
+    # for the HTTP request itself.  Consume (len-1) more so every inner LLM
+    # call counts against the caller's per-minute quota — prevents a single
+    # authenticated request from multiplying into N uncounted back-end calls.
+    consume_n_rate_limit_tokens(request, len(req.calls) - 1)
+
     sem = _asyncio.Semaphore(max(1, req.max_concurrency))
 
     async def _one(call: ChatRequest):

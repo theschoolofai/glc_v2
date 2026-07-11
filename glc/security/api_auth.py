@@ -60,6 +60,34 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _consume_tokens(ip: str, n: int, rpm: int) -> None:
+    """Atomically consume *n* rate-limit tokens for *ip*.
+
+    Acquires the global lock once so a large batch is checked in one shot —
+    all-or-nothing: if the window would overflow, 429 is raised before any
+    tokens are written.
+    """
+    now = time.monotonic()
+    horizon = now - _WINDOW_SECONDS
+
+    with _ratelimit_lock:
+        dq = _ip_windows.setdefault(ip, deque())
+        while dq and dq[0] < horizon:
+            dq.popleft()
+        if len(dq) + n > rpm:
+            _log.warning(
+                "rate limit exceeded for ip=%s current=%d want=%d rpm=%d",
+                ip, len(dq), n, rpm,
+            )
+            raise HTTPException(
+                429,
+                f"rate limit exceeded — maximum {rpm} requests per minute",
+                headers={"Retry-After": str(_WINDOW_SECONDS)},
+            )
+        for _ in range(n):
+            dq.append(now)
+
+
 def check_rate_limit(request: Request) -> None:
     """Sliding-window rate limit: GLC_DATA_PLANE_RPM requests per 60 s per IP.
 
@@ -68,22 +96,21 @@ def check_rate_limit(request: Request) -> None:
     """
     if os.getenv("GLC_DISABLE_API_AUTH") == "1":
         return
+    _consume_tokens(_client_ip(request), 1, _DEFAULT_RPM)
 
-    ip = _client_ip(request)
-    rpm = _DEFAULT_RPM
-    now = time.monotonic()
-    horizon = now - _WINDOW_SECONDS
 
-    with _ratelimit_lock:
-        dq = _ip_windows.setdefault(ip, deque())
-        # evict timestamps older than the window
-        while dq and dq[0] < horizon:
-            dq.popleft()
-        if len(dq) >= rpm:
-            _log.warning("rate limit exceeded for ip=%s count=%d rpm=%d", ip, len(dq), rpm)
-            raise HTTPException(
-                429,
-                f"rate limit exceeded — maximum {rpm} requests per minute",
-                headers={"Retry-After": str(_WINDOW_SECONDS)},
-            )
-        dq.append(now)
+def consume_n_rate_limit_tokens(request: Request, n: int) -> None:
+    """Consume *n* additional rate-limit tokens for the caller's IP.
+
+    Use this for batch endpoints where one HTTP request triggers multiple
+    back-end calls. The router-level ``check_rate_limit`` dependency already
+    consumed 1 token for the outer request; call this with ``n-1`` extra to
+    make each inner call count against the quota.
+
+    Is a no-op when GLC_DISABLE_API_AUTH=1 or n <= 0.
+    """
+    if os.getenv("GLC_DISABLE_API_AUTH") == "1":
+        return
+    if n <= 0:
+        return
+    _consume_tokens(_client_ip(request), n, _DEFAULT_RPM)
