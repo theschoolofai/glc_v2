@@ -147,6 +147,12 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
+    # Fail closed: if no verify-token is configured (expected == ""), treat that
+    # as "verification disabled" and always reject.  Without this guard,
+    # hmac.compare_digest("", "") == True lets any caller pass an empty token
+    # and receive the challenge — effectively bypassing webhook authentication.
+    if not expected:
+        raise HTTPException(status_code=403, detail="webhook verification not configured")
     if mode == "subscribe" and hmac.compare_digest(token, expected):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403)
