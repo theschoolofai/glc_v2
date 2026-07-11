@@ -35,6 +35,7 @@ Outbound pipeline  send(reply) → dict
 from __future__ import annotations
 
 import hashlib
+import os
 import smtplib
 import uuid
 from datetime import datetime
@@ -47,6 +48,7 @@ from glc.channels.catalogue.imap.mime_parser import parse as _mime_parse
 from glc.channels.catalogue.imap.smtp_sender import SmtpSender
 from glc.channels.catalogue.imap.uid_tracker import UidTracker
 from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
+from glc.security.email_auth import is_sender_authenticated
 from glc.security.trust_level import classify
 
 _BOT_FROM = "bot@example.com"
@@ -178,8 +180,15 @@ class Adapter(ChannelAdapter):
             if parsed.references:
                 self._references_cache[parsed.message_id] = parsed.references
 
-        # 3. Trust classification using the bare sender address
-        trust_level = classify(self.name, parsed.sender)
+        # 3. Trust classification using the bare sender address. `From:` is
+        # attacker-controlled, so an unauthenticated sender never gets more
+        # than "untrusted" no matter what the pairing store says — otherwise
+        # anyone could email `From: <owner>` and be granted owner trust.
+        trusted_authserv_id = os.environ.get("GLC_IMAP_TRUSTED_AUTHSERV_ID", "")
+        authenticated = is_sender_authenticated(
+            parsed.auth_results_headers, parsed.sender, trusted_authserv_id
+        )
+        trust_level = classify(self.name, parsed.sender) if authenticated else "untrusted"
 
         # 4. Public-channel gate: silently drop untrusted senders
         if self.is_public_channel and trust_level == "untrusted":

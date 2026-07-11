@@ -32,29 +32,50 @@ STRANGER_ID = STRANGER_EMAIL
 
 BOT_EMAIL = "bot@example.com"
 
+# Trusted authserv-id these tests configure via GLC_IMAP_TRUSTED_AUTHSERV_ID,
+# standing in for "the hostname our real receiving MTA stamps."
+TRUSTED_AUTHSERV_ID = "mx.test-glc.example"
+
+
+def _authentication_results(*, domain: str, dkim_pass: bool) -> str:
+    """A receiving-MTA-style Authentication-Results header (RFC 8601)."""
+    verdict = "pass" if dkim_pass else "fail"
+    return f"{TRUSTED_AUTHSERV_ID}; dkim={verdict} header.d={domain}; spf=neutral"
+
+
 # A minimal but real-looking PDF byte string. The %PDF- magic header
 # is what mime detection routines key on.
 PDF_BYTES = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
 
 
-def _text_message(*, from_addr: str, subject: str, body: str, uid: int) -> dict[str, Any]:
+def _text_message(
+    *, from_addr: str, subject: str, body: str, uid: int, authenticated: bool = False
+) -> dict[str, Any]:
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = BOT_EMAIL
     msg["Subject"] = subject
     msg["Date"] = "Wed, 17 Jun 2026 12:00:00 +0000"
     msg["Message-ID"] = f"<{uid}@example.com>"
+    if authenticated:
+        domain = from_addr.rsplit("@", 1)[-1]
+        msg["Authentication-Results"] = _authentication_results(domain=domain, dkim_pass=True)
     msg.set_content(body)
     return {"uid": uid, "raw": bytes(msg)}
 
 
-def _pdf_attachment_message(*, from_addr: str, body: str, uid: int) -> dict[str, Any]:
+def _pdf_attachment_message(
+    *, from_addr: str, body: str, uid: int, authenticated: bool = False
+) -> dict[str, Any]:
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = BOT_EMAIL
     msg["Subject"] = "report attached"
     msg["Date"] = "Wed, 17 Jun 2026 12:00:00 +0000"
     msg["Message-ID"] = f"<{uid}@example.com>"
+    if authenticated:
+        domain = from_addr.rsplit("@", 1)[-1]
+        msg["Authentication-Results"] = _authentication_results(domain=domain, dkim_pass=True)
     msg.set_content(body)
     msg.add_attachment(PDF_BYTES, maintype="application", subtype="pdf", filename="report.pdf")
     return {"uid": uid, "raw": bytes(msg)}
@@ -74,6 +95,16 @@ class ImapMock:
         return self._next_uid
 
     def queue_owner_message(self, text: str = "hello") -> dict[str, Any]:
+        ev = _text_message(
+            from_addr=OWNER_EMAIL, subject="ping", body=text, uid=self._uid(), authenticated=True
+        )
+        self.inbound_events.append(ev)
+        return ev
+
+    def queue_spoofed_owner_message(self, text: str = "hello") -> dict[str, Any]:
+        """A `From: <owner>` message with no (or a failing) MTA
+        Authentication-Results verdict — the forged-sender attack this fix
+        closes. Must classify as untrusted despite the From match."""
         ev = _text_message(from_addr=OWNER_EMAIL, subject="ping", body=text, uid=self._uid())
         self.inbound_events.append(ev)
         return ev
@@ -84,7 +115,7 @@ class ImapMock:
         return ev
 
     def queue_pdf_attachment_message(self, body: str = "see attached") -> dict[str, Any]:
-        ev = _pdf_attachment_message(from_addr=OWNER_EMAIL, body=body, uid=self._uid())
+        ev = _pdf_attachment_message(from_addr=OWNER_EMAIL, body=body, uid=self._uid(), authenticated=True)
         self.inbound_events.append(ev)
         return ev
 

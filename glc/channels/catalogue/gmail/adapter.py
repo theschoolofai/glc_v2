@@ -33,6 +33,7 @@ from glc.channels.catalogue.gmail.schemas import (
 )
 from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
 from glc.security.allowlists import allowed
+from glc.security.email_auth import is_sender_authenticated
 from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import TrustLevel, classify
 
@@ -152,7 +153,7 @@ class Adapter(ChannelAdapter):
         # In public channel mode, the adapter consults the allowlist before
         # processing strangers (mention_only_in_public default), so untrusted
         # senders are dropped at the adapter level to avoid flooding the agent.
-        trust_level = self._resolve_trust_level(from_addr)
+        trust_level = self._resolve_trust_level(from_addr, email_msg)
 
         if self.config.get("is_public_channel") and not self._check_allowlist(from_addr, trust_level):
             return None  # type: ignore[return-value]
@@ -200,7 +201,7 @@ class Adapter(ChannelAdapter):
             from_addr_raw = email_msg["From"] or ""
             from_addr = self._extract_email(from_addr_raw)
 
-            trust_level = self._resolve_trust_level(from_addr)
+            trust_level = self._resolve_trust_level(from_addr, email_msg)
 
             if self.config.get("is_public_channel") and not self._check_allowlist(from_addr, trust_level):
                 continue
@@ -450,14 +451,26 @@ class Adapter(ChannelAdapter):
     # Person 10 (Vishy): Trust level + error handling helpers
     # ──────────────────────────────────────────────────────────────────
 
-    def _resolve_trust_level(self, sender_email: str) -> TrustLevel:
+    def _resolve_trust_level(self, sender_email: str, email_msg: EmailMessage) -> TrustLevel:
         """Determine trust level using the pairing store.
+
+        `From:` is attacker-controlled, so this only consults the pairing
+        store when the receiving MTA's own Authentication-Results header
+        (RFC 8601) shows the sender authenticated against a trusted
+        authserv-id — otherwise a forged `From: <owner>` would grant
+        owner_paired trust to anyone who can send one email. Configure the
+        trusted authserv-id via GLC_GMAIL_TRUSTED_AUTHSERV_ID (e.g.
+        "mx.google.com"); unset, this always returns 'untrusted'.
 
         Returns:
             'owner_paired' if sender is the channel owner
             'user_paired' if sender is a paired user
-            'untrusted' for unknown senders
+            'untrusted' for unknown or unauthenticated senders
         """
+        trusted_authserv_id = os.environ.get("GLC_GMAIL_TRUSTED_AUTHSERV_ID", "")
+        auth_results_headers = list(email_msg.get_all("Authentication-Results", []) or [])
+        if not is_sender_authenticated(auth_results_headers, sender_email, trusted_authserv_id):
+            return "untrusted"
         return classify("gmail", sender_email)
 
     def _check_allowlist(self, sender_email: str, trust_level: str) -> bool:
