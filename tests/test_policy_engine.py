@@ -83,6 +83,31 @@ def test_glob_does_not_match_other_paths():
     assert v.action == "allow"
 
 
+def test_glob_deny_not_bypassable_by_embedded_newline():
+    """A newline in the argument (a legal path character, fully
+    attacker/model-controllable) must not slip a value past a glob deny
+    rule. Regression for the unsound `.*`-without-DOTALL matcher."""
+    eng = _engine(
+        [
+            PolicyRule(tool="file.delete", condition={"path_glob": "~/Documents/**"}, action="deny"),
+        ]
+    )
+    for path in ["~/Documents/secret\n.txt", "~/Documents/\n../../.ssh/id_rsa", "~/Documents/a\nb"]:
+        v = eng.evaluate(
+            {"name": "file.delete", "arguments": {"path": path}},
+            {"channel": "x", "trust_level": "owner_paired"},
+        )
+        assert v.action == "deny", f"deny bypassed for path={path!r}"
+
+
+def test_matches_glob_handles_newlines():
+    from glc.policy.engine import _matches_glob
+
+    assert _matches_glob("~/Documents/secret.txt", "~/Documents/**") is True
+    assert _matches_glob("~/Documents/secret\n.txt", "~/Documents/**") is True
+    assert _matches_glob("/tmp/other", "~/Documents/**") is False
+
+
 def test_command_matches_list():
     eng = _engine(
         [

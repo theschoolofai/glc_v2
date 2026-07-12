@@ -41,7 +41,15 @@ def _matches_glob(value: Any, pattern: str) -> bool:
     # fnmatch's ** support is weak; substitute ** for a regex-ish pattern.
     if "**" in pattern:
         regex = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
-        return bool(re.match(regex + "$", value))
+        # DOTALL so `.` matches newlines, and \Z (absolute end) instead of $:
+        # without DOTALL a value containing a newline (a legal character in a
+        # filesystem path, and fully attacker/model-controllable in a tool
+        # argument) slips past a glob-based deny rule, because `.*` stops at
+        # the newline and the match fails — turning a `deny` into the
+        # default-allow. `$` compounds it by also matching just before a
+        # trailing newline. A path is a flat string; the glob must match it
+        # whole.
+        return bool(re.match(regex + r"\Z", value, re.DOTALL))
     return fnmatch.fnmatch(value, pattern)
 
 
