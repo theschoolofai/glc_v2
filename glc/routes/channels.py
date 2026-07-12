@@ -28,6 +28,7 @@ from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
+from glc.security.trust_level import classify
 
 router = APIRouter()
 
@@ -66,6 +67,14 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            # Do NOT trust the adapter's self-declared env.trust_level: it is
+            # attacker-controlled input crossing the adapter->gateway boundary.
+            # The gateway is the authority on trust — recompute it from the
+            # pairing store so a spoofed "owner_paired" cannot be honoured or
+            # recorded (invariant 2: every action is checked against the actual
+            # user; invariant 7: the audit log records the true trust level).
+            trust_level = classify(env.channel, env.channel_user_id)
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
@@ -77,7 +86,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 audit_append(
                     channel=env.channel,
                     channel_user_id=env.channel_user_id,
-                    trust_level=env.trust_level,
+                    trust_level=trust_level,
                     event_type="allowlist_drop",
                     result={"reason": why},
                 )
@@ -89,7 +98,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 audit_append(
                     channel=env.channel,
                     channel_user_id=env.channel_user_id,
-                    trust_level=env.trust_level,
+                    trust_level=trust_level,
                     event_type="rate_limit",
                     result={"reason": why},
                 )
@@ -99,7 +108,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             audit_append(
                 channel=env.channel,
                 channel_user_id=env.channel_user_id,
-                trust_level=env.trust_level,
+                trust_level=trust_level,
                 event_type="inbound_message",
                 params={"text": env.text, "thread_id": env.thread_id},
             )
