@@ -28,6 +28,7 @@ from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
+from glc.security.trust_level import classify as classify_trust
 
 router = APIRouter()
 
@@ -66,6 +67,25 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            # Leak 9 fix: cross-channel spoofing — reject envelopes whose
+            # channel field does not match the WS route path.
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level="untrusted",
+                    event_type="channel_mismatch",
+                    result={
+                        "reason": f"envelope.channel={env.channel!r} != route={name!r}"
+                    },
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
+            # Part 2 fix: trust_level self-assertion — always classify from
+            # the pairing store; never trust the adapter's claim.
+            authoritative_trust = classify_trust(env.channel, env.channel_user_id)
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
@@ -77,7 +97,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 audit_append(
                     channel=env.channel,
                     channel_user_id=env.channel_user_id,
-                    trust_level=env.trust_level,
+                    trust_level=authoritative_trust,
                     event_type="allowlist_drop",
                     result={"reason": why},
                 )
@@ -89,7 +109,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 audit_append(
                     channel=env.channel,
                     channel_user_id=env.channel_user_id,
-                    trust_level=env.trust_level,
+                    trust_level=authoritative_trust,
                     event_type="rate_limit",
                     result={"reason": why},
                 )
@@ -99,7 +119,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             audit_append(
                 channel=env.channel,
                 channel_user_id=env.channel_user_id,
-                trust_level=env.trust_level,
+                trust_level=authoritative_trust,
                 event_type="inbound_message",
                 params={"text": env.text, "thread_id": env.thread_id},
             )
@@ -125,6 +145,14 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
+    # Part 2 fix: empty verify token default — reject when not configured.
+    # Previously hmac.compare_digest("", "") would return True for any
+    # subscriber when the env var was absent (Invariant 2: authorization bypass).
+    if not expected:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Webhook verify token for channel '{name}' is not configured.",
+        )
     if mode == "subscribe" and hmac.compare_digest(token, expected):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403)
@@ -149,6 +177,9 @@ async def channel_webhook(name: str, request: Request):
     pairings = get_pairing_store()
     owners = [p.channel_user_id for p in pairings.owners(channel=name)]
 
+    # Part 2 fix: trust_level self-assertion — re-classify from pairing store.
+    authoritative_trust_webhook = classify_trust(msg.channel, msg.channel_user_id)
+
     ok, why = allowed(
         msg.channel,
         msg.channel_user_id,
@@ -160,7 +191,7 @@ async def channel_webhook(name: str, request: Request):
         audit_append(
             channel=msg.channel,
             channel_user_id=msg.channel_user_id,
-            trust_level=msg.trust_level,
+            trust_level=authoritative_trust_webhook,
             event_type="allowlist_drop",
             result={"reason": why},
         )
@@ -171,7 +202,7 @@ async def channel_webhook(name: str, request: Request):
         audit_append(
             channel=msg.channel,
             channel_user_id=msg.channel_user_id,
-            trust_level=msg.trust_level,
+            trust_level=authoritative_trust_webhook,
             event_type="rate_limit",
             result={"reason": why},
         )
@@ -180,7 +211,7 @@ async def channel_webhook(name: str, request: Request):
     audit_append(
         channel=msg.channel,
         channel_user_id=msg.channel_user_id,
-        trust_level=msg.trust_level,
+        trust_level=authoritative_trust_webhook,
         event_type="inbound_message",
         params={"text": msg.text, "thread_id": msg.thread_id, "provider": msg.metadata.get("provider")},
     )

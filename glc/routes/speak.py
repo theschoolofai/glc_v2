@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from glc.security.auth import require_api_auth
 from glc.voice.tts import TTSError, synthesize
 
 router = APIRouter()
@@ -28,7 +29,18 @@ class SpeakResponse(BaseModel):
 
 
 @router.post("/v1/speak", response_model=SpeakResponse)
-async def speak_route(req: SpeakRequest):
+async def speak_route(
+    req: SpeakRequest,
+    _auth: None = Depends(require_api_auth),
+):
+    # Reject oversized text to prevent TTS resource exhaustion (Invariant 8).
+    MAX_TTS_CHARS = int(__import__("os").getenv("GLC_MAX_TTS_CHARS", "5000"))
+    if len(req.text) > MAX_TTS_CHARS:
+        raise HTTPException(
+            413,
+            f"text length {len(req.text)} exceeds maximum {MAX_TTS_CHARS} chars "
+            "(set GLC_MAX_TTS_CHARS to adjust)",
+        )
     try:
         r = await synthesize(req.text, voice_id=req.voice_id, prefer=req.prefer)
     except TTSError as e:
