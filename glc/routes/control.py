@@ -21,11 +21,20 @@ router = APIRouter()
 
 
 def _require_token(authorization: str | None) -> None:
+    """Constant-time bearer token check for control-plane endpoints.
+
+    Uses hmac.compare_digest instead of plain string equality to prevent
+    timing-based oracle attacks (Part 2 Finding: non-constant-time token
+    comparison — Invariant 4: credentials must be scoped and single-purpose).
+    """
+    import hmac as _hmac
+
     expected = get_or_create_install_token()
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
     presented = authorization.removeprefix("Bearer ").strip()
-    if presented != expected:
+    # Constant-time comparison prevents timing oracle.
+    if not _hmac.compare_digest(presented.encode(), expected.encode()):
         raise HTTPException(403, "install token mismatch")
 
 

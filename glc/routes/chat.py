@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -36,6 +36,7 @@ from glc.llm_schemas import (
     VisionRequest,
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.auth import require_api_auth
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -285,24 +286,102 @@ def _required_caps(req: ChatRequest):
     return caps
 
 
+_MAX_IMAGE_BYTES = int(os.getenv("GLC_MAX_IMAGE_BYTES", str(20 * 1024 * 1024)))  # 20 MB
+
+# Cloud metadata and loopback patterns that must never be fetched.
+_BLOCKED_HOSTS = {
+    "169.254.169.254",              # AWS/GCP/Azure IMDS
+    "metadata.google.internal",
+    "metadata.goog",
+    "169.254.170.2",                # ECS task metadata
+    "localhost",                     # loopback hostname
+    "ip6-localhost",                 # IPv6 loopback hostname
+    "ip6-loopback",
+    "broadcasthost",
+    "0.0.0.0",                       # catch-all bind address
+}
+
+
+def _is_ssrf_target(url: str) -> bool:
+    """Return True if the URL targets a private/loopback/metadata address.
+
+    Part 2 SSRF fix: validates image URLs before server-side fetch to prevent
+    probing internal services or cloud metadata endpoints (Invariant 8 / Invariant 1).
+    """
+    import ipaddress
+    import urllib.parse
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return True  # malformed → block
+
+    host = parsed.hostname or ""
+
+    # Block known cloud metadata hostnames.
+    if host.lower() in _BLOCKED_HOSTS:
+        return True
+
+    # Block loopback / link-local / private IP ranges.
+    try:
+        addr = ipaddress.ip_address(host)
+        if addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_reserved:
+            return True
+    except ValueError:
+        pass  # host is a DNS name — that's fine
+
+    # Block non-standard ports that typically serve internal APIs.
+    if parsed.port and parsed.port not in (80, 443, 8080, 8443):
+        return True
+
+    return False
+
+
 async def _resolve_image_urls(messages):
     import base64
 
     import httpx as _httpx
 
     async def _fetch_to_data_url(url: str) -> str:
+        # SSRF guard: block private/loopback/metadata targets.
+        if _is_ssrf_target(url):
+            raise HTTPException(
+                400,
+                f"image url {url!r} targets a blocked address (SSRF guard)",
+            )
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
+        async with _httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=True,
+            headers=headers,
+            # Do not follow redirects to private addresses.
+        ) as c:
             try:
                 r = await c.get(url)
                 r.raise_for_status()
             except _httpx.HTTPError as e:
                 raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+            # Guard against oversized image responses.
+            content_length = int(r.headers.get("content-length", 0))
+            if content_length > _MAX_IMAGE_BYTES:
+                raise HTTPException(
+                    413, f"image at {url!r} exceeds {_MAX_IMAGE_BYTES} byte limit"
+                )
+            content = r.content
+            if len(content) > _MAX_IMAGE_BYTES:
+                raise HTTPException(
+                    413, f"image at {url!r} exceeds {_MAX_IMAGE_BYTES} byte limit"
+                )
+            # Re-check redirect target is not SSRF.
+            if _is_ssrf_target(str(r.url)):
+                raise HTTPException(
+                    400, f"image url {url!r} redirected to a blocked address (SSRF guard)"
+                )
             mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
+            b64 = base64.b64encode(content).decode()
             return f"data:{mt};base64,{b64}"
 
     out = []
@@ -345,7 +424,11 @@ def _validate_structured(text: str, schema: dict):
 
 
 @router.post("/v1/chat")
-async def chat(req: ChatRequest, request: Request):
+async def chat(
+    req: ChatRequest,
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
     state = request.app.state
     rtr = state.router
     router_pool = state.router_pool
@@ -638,8 +721,22 @@ async def chat(req: ChatRequest, request: Request):
 
 
 @router.post("/v1/chat/batch")
-async def chat_batch(req: BatchChatRequest, request: Request):
-    sem = _asyncio.Semaphore(max(1, req.max_concurrency))
+async def chat_batch(
+    req: BatchChatRequest,
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
+    # Cap concurrency and total calls to prevent resource exhaustion
+    # (Part 2 Finding: unbounded batch concurrency — Invariant 8).
+    MAX_BATCH_CALLS = int(__import__("os").getenv("GLC_MAX_BATCH_CALLS", "50"))
+    MAX_CONCURRENCY = int(__import__("os").getenv("GLC_MAX_BATCH_CONCURRENCY", "8"))
+    if len(req.calls) > MAX_BATCH_CALLS:
+        raise HTTPException(
+            413,
+            f"batch.calls exceeds maximum of {MAX_BATCH_CALLS} "
+            f"(set GLC_MAX_BATCH_CALLS to adjust)",
+        )
+    sem = _asyncio.Semaphore(min(max(1, req.max_concurrency), MAX_CONCURRENCY))
 
     async def _one(call: ChatRequest):
         async with sem:
@@ -655,7 +752,11 @@ async def chat_batch(req: BatchChatRequest, request: Request):
 
 
 @router.post("/v1/vision")
-async def vision(req: VisionRequest, request: Request):
+async def vision(
+    req: VisionRequest,
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
     content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
     content.append({"type": "image_url", "image_url": {"url": req.image}})
     inner = ChatRequest(
@@ -677,7 +778,11 @@ async def vision(req: VisionRequest, request: Request):
 
 
 @router.post("/v1/embed")
-async def embed(req: EmbedRequest, request: Request):
+async def embed(
+    req: EmbedRequest,
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
     from glc import embedders as E
 
     state = request.app.state
@@ -740,7 +845,10 @@ async def embed(req: EmbedRequest, request: Request):
 
 
 @router.get("/v1/embedders")
-async def list_embedders(request: Request):
+async def list_embedders(
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
     from glc import embedders as E
 
     state = request.app.state
@@ -756,7 +864,11 @@ async def list_embedders(request: Request):
 
 
 @router.get("/v1/cost/by_agent")
-async def cost_by_agent(session: str | None = None, agent: str | None = None):
+async def cost_by_agent(
+    session: str | None = None,
+    agent: str | None = None,
+    _auth: None = Depends(require_api_auth),
+):
     from glc import pricing as _pricing
 
     raw = db.by_agent(session=session)
@@ -773,7 +885,10 @@ async def cost_by_agent(session: str | None = None, agent: str | None = None):
 
 
 @router.get("/v1/providers")
-async def list_providers(request: Request):
+async def list_providers(
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
     r = request.app.state.router
     return {
         "order": r.order,
@@ -785,7 +900,10 @@ async def list_providers(request: Request):
 
 
 @router.get("/v1/capabilities")
-async def capabilities(request: Request):
+async def capabilities(
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
     r = request.app.state.router
     out = {}
     for name, p in r.providers.items():
@@ -804,7 +922,10 @@ async def capabilities(request: Request):
 
 
 @router.get("/v1/status")
-async def status(request: Request):
+async def status(
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
     r = request.app.state.router
     return {
         "order": r.order,
@@ -815,7 +936,10 @@ async def status(request: Request):
 
 
 @router.get("/v1/routers")
-async def routers(request: Request):
+async def routers(
+    request: Request,
+    _auth: None = Depends(require_api_auth),
+):
     rp = request.app.state.router_pool
     return {
         "order": rp.order,
@@ -828,6 +952,14 @@ async def routers(request: Request):
     }
 
 
+MAX_CALLS_LIMIT = 500  # Hard cap on /v1/calls results to prevent data exfiltration.
+
+
 @router.get("/v1/calls")
-async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
-    return db.recent(limit=limit, provider=provider, status=status)
+async def calls(
+    limit: int = 100,
+    provider: str | None = None,
+    status: str | None = None,
+    _auth: None = Depends(require_api_auth),
+):
+    return db.recent(limit=min(limit, MAX_CALLS_LIMIT), provider=provider, status=status)

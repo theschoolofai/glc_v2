@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from glc.security.auth import require_api_auth
 from glc.voice.stt import STTError, transcribe
 
 router = APIRouter()
@@ -29,7 +30,19 @@ class TranscribeResponse(BaseModel):
 
 
 @router.post("/v1/transcribe", response_model=TranscribeResponse)
-async def transcribe_route(req: TranscribeRequest):
+async def transcribe_route(
+    req: TranscribeRequest,
+    _auth: None = Depends(require_api_auth),
+):
+    # Reject oversized payloads early (Part 2 Finding: no body size limits — Invariant 8).
+    # 10 MB base64 ~ 7.5 MB audio (generous for ~5 min at 192kbps).
+    MAX_AUDIO_B64_LEN = int(__import__("os").getenv("GLC_MAX_AUDIO_B64_LEN", str(10 * 1024 * 1024)))
+    if len(req.audio_b64) > MAX_AUDIO_B64_LEN:
+        raise HTTPException(
+            413,
+            f"audio_b64 length {len(req.audio_b64)} exceeds maximum "
+            f"{MAX_AUDIO_B64_LEN} bytes (set GLC_MAX_AUDIO_B64_LEN to adjust)",
+        )
     try:
         audio = base64.b64decode(req.audio_b64)
     except Exception as e:

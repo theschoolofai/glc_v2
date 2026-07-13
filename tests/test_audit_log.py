@@ -41,9 +41,10 @@ def test_store_exposes_no_update_or_delete():
     assert len([n for n in public if n in ("update", "delete", "modify")]) == 0
 
 
-def test_schema_version_is_one():
+def test_schema_version_is_two():
+    """A6/Leak 2 fix: schema was bumped to version 2 to add prev_hash column."""
     init_store()
-    assert schema_version() == 1
+    assert schema_version() == 2
 
 
 def test_query_filters_by_session_and_channel():
