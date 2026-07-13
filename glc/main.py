@@ -13,6 +13,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 ROOT = Path(__file__).parent
@@ -73,7 +74,31 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
+# Disable interactive docs in production (A2: information disclosure fix).
+_docs_url = None if os.getenv("GLC_ENV", "").lower() == "production" else "/docs"
+_redoc_url = None if os.getenv("GLC_ENV", "").lower() == "production" else "/redoc"
+_openapi_url = None if os.getenv("GLC_ENV", "").lower() == "production" else "/openapi.json"
+
+app = FastAPI(
+    title="GLC v1 — Gateway for LLMs and Channels",
+    lifespan=lifespan,
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
+    openapi_url=_openapi_url,
+)
+
+# CORS: default to restrictive (no cross-origin access).
+# Operators can loosen this via GLC_CORS_ORIGINS env var (comma-separated list).
+_cors_origins_raw = os.getenv("GLC_CORS_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 app.include_router(chat_route.router)
 app.include_router(transcribe_route.router)

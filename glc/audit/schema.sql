@@ -1,5 +1,6 @@
 -- glc_v1 audit log. Append-only; the application layer never issues
 -- UPDATE or DELETE against this table.
+-- Schema version 2: added prev_hash column for hash-chain integrity.
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12,7 +13,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     tool            TEXT,
     policy_verdict  TEXT,
     params_json     TEXT,
-    result_json     TEXT
+    result_json     TEXT,
+    prev_hash       TEXT    -- SHA-256 of previous row; genesis hash for row 1.
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
@@ -26,3 +28,4 @@ CREATE TABLE IF NOT EXISTS audit_schema (
     applied_at REAL NOT NULL
 );
 INSERT OR IGNORE INTO audit_schema (version, applied_at) VALUES (1, strftime('%s','now'));
+INSERT OR IGNORE INTO audit_schema (version, applied_at) VALUES (2, strftime('%s','now'));
