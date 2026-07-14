@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 from glc.security.pairing import CODE_TTL_SECONDS, PairingStore
@@ -71,3 +72,25 @@ def test_code_collision_replaces_pending():
     # the user shouldn't have to remember which old code is live).
     if code1 != code2:
         assert store.confirm_code(code2) is not None
+
+
+def test_concurrent_confirm_is_not_double_confirmed():
+    """Invariant 4: a one-time pairing code -- including one requesting
+    owner_paired, the highest trust level -- must not be confirmable by
+    more than one concurrent caller."""
+    store = PairingStore()
+    code, _ = store.issue_code("telegram", "u1", requested_trust_level="owner_paired")
+
+    results: list = []
+
+    def confirm():
+        results.append(store.confirm_code(code))
+
+    threads = [threading.Thread(target=confirm) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    successes = [r for r in results if r is not None]
+    assert len(successes) == 1

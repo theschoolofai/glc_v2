@@ -96,37 +96,54 @@ class PairingStore:
         return code, expires_at
 
     def confirm_code(self, code: str) -> PairingRecord | None:
+        """Invariant 4 (a credential must work only once): this used to be
+        three separate autocommit statements (SELECT the code, INSERT the
+        pairing, DELETE the code) with no lock between them. Two concurrent
+        confirm requests for the same one-time code could both pass the
+        SELECT before either DELETE ran, so the same code -- including one
+        requesting owner_paired, the highest trust level -- could confirm
+        twice. BEGIN IMMEDIATE takes the write lock up front so a second
+        concurrent caller blocks until the first transaction commits, and
+        by then the code is already gone."""
         with _conn() as c:
-            row = c.execute(
-                "SELECT * FROM pending_codes WHERE code=?",
-                (code,),
-            ).fetchone()
-            if row is None:
-                return None
-            if row["expires_at"] < time.time():
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                row = c.execute(
+                    "SELECT * FROM pending_codes WHERE code=?",
+                    (code,),
+                ).fetchone()
+                if row is None:
+                    c.execute("ROLLBACK")
+                    return None
+                if row["expires_at"] < time.time():
+                    c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
+                    c.execute("COMMIT")
+                    return None
+                paired_at = time.time()
+                c.execute(
+                    """INSERT OR REPLACE INTO pairings
+                       (channel, channel_user_id, user_handle, trust_level, paired_at)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        row["channel"],
+                        row["channel_user_id"],
+                        row["user_handle"],
+                        row["requested_trust_level"],
+                        paired_at,
+                    ),
+                )
                 c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
-                return None
-            paired_at = time.time()
-            c.execute(
-                """INSERT OR REPLACE INTO pairings
-                   (channel, channel_user_id, user_handle, trust_level, paired_at)
-                   VALUES (?,?,?,?,?)""",
-                (
-                    row["channel"],
-                    row["channel_user_id"],
-                    row["user_handle"],
-                    row["requested_trust_level"],
-                    paired_at,
-                ),
-            )
-            c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
-            return PairingRecord(
-                channel=row["channel"],
-                channel_user_id=row["channel_user_id"],
-                user_handle=row["user_handle"] or "",
-                trust_level=row["requested_trust_level"],
-                paired_at=paired_at,
-            )
+                c.execute("COMMIT")
+                return PairingRecord(
+                    channel=row["channel"],
+                    channel_user_id=row["channel_user_id"],
+                    user_handle=row["user_handle"] or "",
+                    trust_level=row["requested_trust_level"],
+                    paired_at=paired_at,
+                )
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
 
     def lookup(self, channel: str, channel_user_id: str) -> PairingRecord | None:
         with _conn() as c:
