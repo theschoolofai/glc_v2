@@ -127,10 +127,17 @@ class ChatResponse(BaseModel):
 
 class BatchChatRequest(BaseModel):
     """V8 batch endpoint. The gateway dispatches the inner calls with
-    bounded parallelism so providers' rate limits are respected centrally."""
+    bounded parallelism so providers' rate limits are respected centrally.
 
-    calls: list[ChatRequest]
-    max_concurrency: int = 4
+    Invariant 8 (hard limits on tool calls and cost): neither field had a
+    ceiling. A caller could send max_concurrency=500 with hundreds of
+    calls and fire that many simultaneous upstream LLM requests from a
+    single POST -- real cost, fired all at once, with no limit on either
+    the batch size or how much of it runs in parallel.
+    """
+
+    calls: list[ChatRequest] = Field(max_length=100)
+    max_concurrency: int = Field(default=4, ge=1, le=16)
 
 
 class VisionRequest(BaseModel):
