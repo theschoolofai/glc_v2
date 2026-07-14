@@ -64,10 +64,17 @@ class ChatRequest(BaseModel):
 
     # New in V8: agent tag (which skill is calling) and session tag (which
     # flow-run). Used for cost-by-agent rollups and provider pinning via
-    # agent_routing.yaml. Both are free-form strings; the gateway logs them
-    # but does not validate them against any whitelist.
-    agent: str | None = None
-    session: str | None = None
+    # agent_routing.yaml.
+    #
+    # Invariant 5 (every stored fact must record its actual source): these
+    # were fully free-form and unvalidated, and db.log_call() writes them
+    # straight into the cost ledger with no check that the caller has any
+    # right to that label. Any caller could attribute their own spend to a
+    # different, pre-existing agent's or session's cost rollup just by
+    # naming it in the request body. Bounding length/charset stops it
+    # being an open dumping ground for arbitrary or oversized values.
+    agent: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    session: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 
 
 class RouterDecision(BaseModel):
@@ -152,7 +159,12 @@ class VisionRequest(BaseModel):
     provider: str | None = None
     max_tokens: int = 1024
     temperature: float = 0.0
-    agent: str | None = None
-    session: str | None = None
+    # Same validation as ChatRequest.agent/session above, and for the same
+    # reason: vision() builds an inner ChatRequest from these values, so
+    # leaving them unvalidated here just means the same bug resurfaces via
+    # /v1/vision (and would raise an unhandled ValidationError instead of a
+    # clean 422 when that inner ChatRequest gets constructed).
+    agent: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    session: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 
     model_config = ConfigDict(populate_by_name=True)
