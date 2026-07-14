@@ -37,7 +37,9 @@ _SAFE_DEFAULT = PolicyConfig(
 
 def _matches_glob(value: Any, pattern: str) -> bool:
     if not isinstance(value, str):
-        return False
+        # Raise so evaluate() can fail-closed: a non-string where a string is
+        # expected is suspicious and must not silently skip a deny rule.
+        raise TypeError(f"expected str for glob condition, got {type(value).__name__!r}")
     # fnmatch's ** support is weak; substitute ** for a regex-ish pattern.
     if "**" in pattern:
         regex = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
@@ -54,7 +56,9 @@ def _matches_condition(condition: dict[str, Any], params: dict[str, Any]) -> boo
         elif key.endswith("_regex"):
             target = key[: -len("_regex")]
             val = params.get(target)
-            if not isinstance(val, str) or not re.search(expected, val):
+            if not isinstance(val, str):
+                raise TypeError(f"expected str for regex condition, got {type(val).__name__!r}")
+            if not re.search(expected, val):
                 return False
         elif key.endswith("_in"):
             target = key[: -len("_in")]
@@ -63,7 +67,7 @@ def _matches_condition(condition: dict[str, Any], params: dict[str, Any]) -> boo
         elif key == "command_matches":
             cmd = params.get("command", "")
             if not isinstance(cmd, str):
-                return False
+                raise TypeError(f"expected str for command_matches condition, got {type(cmd).__name__!r}")
             patterns = expected if isinstance(expected, list) else [expected]
             if not any(p in cmd for p in patterns):
                 return False
@@ -118,7 +122,14 @@ class PolicyEngine:
                 continue
             if rule.trust_level != "*" and rule.trust_level != trust_level:
                 continue
-            if rule.condition and not _matches_condition(rule.condition, params):
+            try:
+                condition_ok = not rule.condition or _matches_condition(rule.condition, params)
+            except TypeError:
+                # A condition received a non-string argument where a string is
+                # required (glob, regex, command_matches). Fail-closed: treat
+                # the condition as satisfied so deny rules still fire.
+                condition_ok = True
+            if not condition_ok:
                 continue
             if first_match is None:
                 first_match = (i, rule)

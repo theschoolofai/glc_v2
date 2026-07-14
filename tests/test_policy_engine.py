@@ -96,6 +96,70 @@ def test_command_matches_list():
     assert v.action == "deny"
 
 
+def test_glob_deny_not_bypassed_by_non_string_path():
+    """Non-string path (e.g. list) must not silently skip a deny rule.
+
+    Before the fix, _matches_glob returned False for non-string values, so an
+    owner_paired caller could pass path=["~/Documents/secret.txt"] and hit the
+    default-allow fallthrough instead of the deny rule.  The fix raises
+    TypeError, which evaluate() catches and treats as fail-closed (deny).
+    """
+    eng = _engine(
+        [
+            PolicyRule(
+                tool="file.delete",
+                condition={"path_glob": "~/Documents/**"},
+                action="deny",
+                reason="docs are protected",
+            ),
+        ]
+    )
+    # list path — must deny, not allow
+    v_list = eng.evaluate(
+        {"name": "file.delete", "arguments": {"path": ["~/Documents/secret.txt"]}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v_list.action == "deny", f"list path bypassed deny rule: {v_list}"
+
+    # None path — must deny, not allow
+    v_none = eng.evaluate(
+        {"name": "file.delete", "arguments": {"path": None}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v_none.action == "deny", f"None path bypassed deny rule: {v_none}"
+
+    # Correct string path outside Documents — must still allow
+    v_safe = eng.evaluate(
+        {"name": "file.delete", "arguments": {"path": "/tmp/junk.txt"}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v_safe.action == "allow"
+
+
+def test_command_matches_deny_not_bypassed_by_non_string_command():
+    """Non-string command (e.g. list) must not silently skip a deny rule."""
+    eng = _engine(
+        [
+            PolicyRule(
+                tool="shell.exec",
+                condition={"command_matches": ["sudo", "rm -rf"]},
+                action="deny",
+            ),
+        ]
+    )
+    v = eng.evaluate(
+        {"name": "shell.exec", "arguments": {"command": ["sudo", "apt"]}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v.action == "deny", f"list command bypassed deny rule: {v}"
+
+    v_safe = eng.evaluate(
+        {"name": "shell.exec", "arguments": {"command": "echo hello"}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v_safe.action == "allow"
+
+
 def test_untrusted_wildcard_deny():
     eng = _engine(
         [
