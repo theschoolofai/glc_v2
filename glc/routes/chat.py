@@ -36,6 +36,7 @@ from glc.llm_schemas import (
     VisionRequest,
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.rate_limits import get_rate_limiter
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -349,6 +350,27 @@ async def chat(req: ChatRequest, request: Request):
     state = request.app.state
     rtr = state.router
     router_pool = state.router_pool
+
+    # Invariant 8 (hard limits on tool calls): RateLimiter.check_tool_call()
+    # existed but had no call site anywhere, so tool_calls_per_minute in
+    # channels.yaml looked enforced but wasn't. This is the one place a
+    # tool call can actually be produced (the LLM response's tool_calls);
+    # /v1/vision and /v1/chat/batch both delegate to this same function,
+    # so checking here covers all three. There is no channel/
+    # channel_user_id at this endpoint — req.agent/req.session are the
+    # only caller-identity signal /v1/chat has — so the limiter's
+    # (channel, user_id)-shaped key is reused with (agent, session)
+    # values instead. We can't know in advance whether the model will
+    # actually call a tool, so a tool-capable request (req.tools set) is
+    # checked against the budget before any provider call is made.
+    if req.tools:
+        limiter = get_rate_limiter()
+        agent_key = req.agent or "unknown-agent"
+        session_key = req.session or "unknown-session"
+        ok, why = limiter.check_tool_call(agent_key, session_key)
+        if not ok:
+            raise HTTPException(429, why)
+
     messages = _normalize_messages(req)
     if any(P._content_has_image(m.get("content")) for m in messages):
         messages = await _resolve_image_urls(messages)
