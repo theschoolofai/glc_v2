@@ -285,6 +285,9 @@ def _required_caps(req: ChatRequest):
     return caps
 
 
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB hard cap
+
+
 async def _resolve_image_urls(messages):
     import base64
 
@@ -297,12 +300,31 @@ async def _resolve_image_urls(messages):
         }
         async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
             try:
-                r = await c.get(url)
-                r.raise_for_status()
+                # Invariant 8 (hard limits): this used to be `r = await
+                # c.get(url)` followed by `r.content`, which buffers the
+                # *entire* response into memory before any size check at
+                # all -- a caller pointing this at a large or slow-drip
+                # response could exhaust container memory. Stream instead,
+                # rejecting on Content-Length up front when present, and
+                # enforcing the same cap on the actual bytes received in
+                # case Content-Length is absent or lies.
+                async with c.stream("GET", url) as r:
+                    r.raise_for_status()
+                    content_length = r.headers.get("content-length")
+                    if content_length is not None and int(content_length) > _MAX_IMAGE_BYTES:
+                        raise HTTPException(413, "image exceeds size limit")
+                    chunks = []
+                    total = 0
+                    async for chunk in r.aiter_bytes(chunk_size=65536):
+                        total += len(chunk)
+                        if total > _MAX_IMAGE_BYTES:
+                            raise HTTPException(413, "image exceeds size limit")
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+                    mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
             except _httpx.HTTPError as e:
                 raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
+            b64 = base64.b64encode(data).decode()
             return f"data:{mt};base64,{b64}"
 
     out = []
