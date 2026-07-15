@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import json
+import logging
 import os
+
+_log = logging.getLogger("glc.chat")
 import time
 from pathlib import Path
 from typing import Any
@@ -285,22 +288,43 @@ def _required_caps(req: ChatRequest):
     return caps
 
 
+def _is_ssrf_url(url: str) -> bool:
+    """C1: return True when the URL targets a loopback or private-range host."""
+    import ipaddress
+    import urllib.parse
+
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        return True
+    _BLOCKED = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "metadata.google.internal"})
+    if host in _BLOCKED:
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_reserved
+    except ValueError:
+        return False  # not an IP literal; hostname allowed
+
+
 async def _resolve_image_urls(messages):
     import base64
 
     import httpx as _httpx
 
     async def _fetch_to_data_url(url: str) -> str:
+        if _is_ssrf_url(url):
+            raise HTTPException(400, "image URL targets a disallowed host")
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
+        async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
             try:
                 r = await c.get(url)
                 r.raise_for_status()
             except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+                raise HTTPException(400, f"failed to fetch image url: {e}")
             mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
             b64 = base64.b64encode(r.content).decode()
             return f"data:{mt};base64,{b64}"
@@ -332,12 +356,38 @@ async def _resolve_image_urls(messages):
     return out
 
 
+_SCHEMA_VALIDATE_TIMEOUT = 2.0
+_VALIDATOR_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="schema-validator"
+)
+
+
+def _check_schema_safe(schema: dict, _depth: int = 0) -> None:
+    """Reject schemas that could cause recursive $ref bombs or excessive nesting."""
+    if _depth > 12:
+        raise ValueError("schema nesting depth exceeds limit")
+    if isinstance(schema, dict):
+        ref = schema.get("$ref", "")
+        if ref == "#" or ref.endswith("/#") or ref.endswith("/$defs") or ref == "#/$defs":
+            raise ValueError(f"self-referential $ref '{ref}' is not allowed")
+        for v in schema.values():
+            _check_schema_safe(v, _depth + 1)
+    elif isinstance(schema, list):
+        for item in schema:
+            _check_schema_safe(item, _depth + 1)
+
+
 def _validate_structured(text: str, schema: dict):
     try:
         obj = json.loads(text)
     except Exception as e:
         raise ValueError(f"output is not JSON: {e}")
-    Draft202012Validator(schema).validate(obj)
+    _check_schema_safe(schema)
+    fut = _VALIDATOR_POOL.submit(Draft202012Validator(schema).validate, obj)
+    try:
+        fut.result(timeout=_SCHEMA_VALIDATE_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        raise ValueError("schema validation timed out — schema may be overly complex")
     return obj
 
 
@@ -471,7 +521,8 @@ async def chat(req: ChatRequest, request: Request):
                             session=req.session,
                             retries=retries,
                         )
-                        yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
+                        _log.error("streaming provider %s error: %s", name, e)
+                        yield f"data: {json.dumps({'error': 'provider error'})}\n\n"
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -542,6 +593,15 @@ async def chat(req: ChatRequest, request: Request):
             if router_decision is not None:
                 router_decision.chosen_worker_provider = name
                 router_decision.chosen_worker_model = result["model"]
+            # CF-5: scrub internal routing fields before sending to caller;
+            # router_provider/router_model reveal agent_routing.yaml internals.
+            public_router_decision = (
+                router_decision.model_copy(
+                    update={"router_provider": "(redacted)", "router_model": "(redacted)"}
+                )
+                if router_decision is not None
+                else None
+            )
             db.log_call(
                 provider=name,
                 model=result["model"],
@@ -579,7 +639,7 @@ async def chat(req: ChatRequest, request: Request):
                 reasoning_applied=result["reasoning_applied"],
                 parsed=parsed,
                 attempted=all_attempts,
-                router_decision=router_decision,
+                router_decision=public_router_decision,
                 retries=retries,
             ).model_dump()
         except P.ProviderError as e:
@@ -605,7 +665,8 @@ async def chat(req: ChatRequest, request: Request):
                 tag += f" → backoff {secs:.0f}s ({reason})"
             all_attempts.append({"provider": name, "reason": tag})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                _log.error("provider %s failed: %s", name, e)
+                raise HTTPException(502, "upstream provider error")
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
@@ -630,11 +691,13 @@ async def chat(req: ChatRequest, request: Request):
             )
             all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                _log.error("provider %s exception: %s", name, e)
+                raise HTTPException(502, "upstream provider error")
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    _log.error("all providers unavailable. attempts: %s last_error: %s", all_attempts, last_err)
+    raise HTTPException(503, "all providers unavailable")
 
 
 @router.post("/v1/chat/batch")
