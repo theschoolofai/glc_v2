@@ -70,3 +70,25 @@ def test_transcribe_stub_returns_501(app_client):
     body = {"audio_b64": base64.b64encode(b"\x00").decode(), "mime": "audio/wav", "prefer": "default"}
     r = app_client.post("/v1/transcribe", json=body)
     assert r.status_code == 501
+
+
+def test_transcribe_oversize_payload_returns_413(app_client, monkeypatch):
+    """Invariant 8: an audio_b64 above the size cap is rejected with 413
+    before it is decoded into memory (edge memory-exhaustion DoS guard)."""
+    import glc.routes.transcribe as t
+
+    monkeypatch.setattr(t, "_MAX_AUDIO_B64_CHARS", 64)
+    # Over the cap; must be rejected on length, never reaching b64decode.
+    r = app_client.post("/v1/transcribe", json={"audio_b64": "A" * 128, "mime": "audio/wav"})
+    assert r.status_code == 413
+
+
+def test_transcribe_at_limit_still_decodes(app_client, monkeypatch):
+    """A payload within the cap is not rejected by the size guard."""
+    register_test_provider("groq_whisper", _fake_provider("groq_whisper"))
+    import glc.routes.transcribe as t
+
+    monkeypatch.setattr(t, "_MAX_AUDIO_B64_CHARS", 10_000)
+    body = {"audio_b64": base64.b64encode(b"\x00" * 100).decode(), "mime": "audio/wav"}
+    r = app_client.post("/v1/transcribe", json=body)
+    assert r.status_code == 200
