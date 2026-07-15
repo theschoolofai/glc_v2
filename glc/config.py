@@ -41,18 +41,29 @@ def install_token_path() -> Path:
     return CONFIG_DIR / "install_token"
 
 
+_token_cache: str | None = None
+
+
 def get_or_create_install_token() -> str:
     """Per-installation token used to authenticate WS adapter connections
-    and /v1/control/* requests. Generated once and persisted to disk."""
-    p = install_token_path()
-    if p.exists():
-        return p.read_text().strip()
+    and /v1/control/* requests.
+
+    The token is cached in memory and the on-disk file is deleted after the
+    first read so it is not readable by untrusted in-process code at runtime.
+    """
+    global _token_cache
+    if _token_cache is not None:
+        return _token_cache
     import secrets
 
-    tok = secrets.token_urlsafe(32)
-    p.write_text(tok)
-    try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
+    p = install_token_path()
+    if p.exists():
+        tok = p.read_text().strip()
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    else:
+        tok = secrets.token_urlsafe(32)
+    _token_cache = tok
     return tok
