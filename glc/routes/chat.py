@@ -62,12 +62,11 @@ TIER_TO_ORDER = {
 ROUTER_SAMPLE_HEAD = 400
 ROUTER_SAMPLE_TAIL = 400
 ROUTER_PROMPT = (
-    "You are a routing classifier. Given a token_count and a content sample, "
+    "You are a routing classifier. Given a token_count, message_count, and has_tools flag, "
     "output exactly one of: TINY, LARGE, or HUGE.\n\n"
     "Rules:\n"
-    "- TINY: token_count below 1000 with simple factual content.\n"
-    "- LARGE: token_count between 1000 and 8000, OR token_count below 1000 "
-    "but content is dense (code, base64, multilingual, technical).\n"
+    "- TINY: token_count below 1000 and has_tools is False.\n"
+    "- LARGE: token_count between 1000 and 8000, OR token_count below 1000 and has_tools is True.\n"
     "- HUGE: token_count above 8000.\n\n"
     "Output the single word and nothing else."
 )
@@ -116,8 +115,9 @@ async def _classify_tier(req, role, router_pool, prompt_text):
             router_latency_ms=0,
             fallback_used=True,
         )
-    sample = _build_sample(prompt_text)
-    envelope = f"token_count: {estimated}\nsample:\n{sample}"
+    message_count = len(req.messages) if req.messages else 1
+    has_tools = bool(req.tools)
+    envelope = f"token_count: {estimated}\nmessage_count: {message_count}\nhas_tools: {has_tools}"
     call_role = f"router_{role}"
     last_provider = last_model = ""
     last_latency = 0
