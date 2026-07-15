@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -36,6 +36,8 @@ from glc.llm_schemas import (
     VisionRequest,
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.auth import require_install_token
+from glc.security.rate_limits import enforce_data_plane_limits
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -69,7 +71,7 @@ ROUTER_PROMPT = (
     "Output the single word and nothing else."
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_install_token), Depends(enforce_data_plane_limits)])
 
 
 # ─────────────────────────── helpers (verbatim port) ──────────────────────────
@@ -287,20 +289,39 @@ def _required_caps(req: ChatRequest):
 
 async def _resolve_image_urls(messages):
     import base64
+    from urllib.parse import urljoin
 
     import httpx as _httpx
+
+    from glc.security.ssrf import is_safe_url
 
     async def _fetch_to_data_url(url: str) -> str:
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
+        current_url = url
+        max_redirects = 5
+        async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
+            for _ in range(max_redirects + 1):
+                if not is_safe_url(current_url):
+                    raise HTTPException(400, f"unallowed image URL destination: {current_url!r}")
+                try:
+                    r = await c.get(current_url)
+                except _httpx.HTTPError as e:
+                    raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+
+                if r.status_code in (301, 302, 303, 307, 308):
+                    redirect_url = r.headers.get("Location")
+                    if not redirect_url:
+                        break
+                    current_url = urljoin(current_url, redirect_url)
+                    continue
                 r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+                break
+            else:
+                raise HTTPException(400, "Too many redirects")
+
             mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
             b64 = base64.b64encode(r.content).decode()
             return f"data:{mt};base64,{b64}"
@@ -605,7 +626,10 @@ async def chat(req: ChatRequest, request: Request):
                 tag += f" → backoff {secs:.0f}s ({reason})"
             all_attempts.append({"provider": name, "reason": tag})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                import logging
+
+                logging.error(f"[glc] Upstream provider {name} failed: {e}")
+                raise HTTPException(502, "upstream provider error")
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
@@ -628,13 +652,19 @@ async def chat(req: ChatRequest, request: Request):
                 session=req.session,
                 retries=retries,
             )
-            all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
+            all_attempts.append({"provider": name, "reason": "exception"})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                import logging
+
+                logging.error(f"[glc] Upstream provider {name} exception: {e}")
+                raise HTTPException(502, "upstream provider error")
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    import logging
+
+    logging.error(f"[glc] All providers failed: {all_attempts}. Last error: {last_err}")
+    raise HTTPException(503, "all upstream providers failed to respond")
 
 
 @router.post("/v1/chat/batch")
@@ -646,9 +676,12 @@ async def chat_batch(req: BatchChatRequest, request: Request):
             try:
                 return await chat(call, request)
             except HTTPException as he:
-                return {"error": str(he.detail), "status_code": he.status_code}
+                return {"error": "request failed", "status_code": he.status_code}
             except Exception as e:
-                return {"error": str(e)[:400], "status_code": 500}
+                import logging
+
+                logging.error(f"[glc] Batch call exception: {e}")
+                return {"error": "internal gateway error", "status_code": 500}
 
     results = await _asyncio.gather(*[_one(c) for c in req.calls])
     return {"results": results}

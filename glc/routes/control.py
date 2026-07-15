@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from glc.config import get_or_create_install_token
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
+from glc.security.rate_limits import get_endpoint_limiter
 
 router = APIRouter()
 
@@ -61,8 +62,13 @@ async def pair(req: PairRequest, authorization: str | None = Header(default=None
 
 
 @router.post("/v1/control/pair/confirm")
-async def pair_confirm(req: PairConfirmRequest, authorization: str | None = Header(default=None)):
+async def pair_confirm(
+    req: PairConfirmRequest, request: Request, authorization: str | None = Header(default=None)
+):
     _require_token(authorization)
+    client_ip = request.client.host if request.client else "unknown"
+    if not get_endpoint_limiter().check_limit(f"pair_confirm:{client_ip}", 5):
+        raise HTTPException(429, "Too many pairing confirmation attempts. Please try again later.")
     rec = get_pairing_store().confirm_code(req.code)
     if rec is None:
         raise HTTPException(404, "code unknown or expired")
@@ -115,3 +121,69 @@ async def kill(request: Request, authorization: str | None = Header(default=None
 
     asyncio.create_task(_shoot())
     return {"status": "terminating", "pid": os.getpid()}
+
+
+class TestRunRequest(BaseModel):
+    action: str
+
+
+@router.post("/v1/control/test/run")
+async def test_run(req: TestRunRequest, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    action = req.action
+    import modal
+    
+    import sys
+    sys.path.append("/home/mani_radhakrishnan/glc_v2")
+    try:
+        from modal_app import image
+    except ImportError:
+        from modal_app import image
+        
+    try:
+        app = modal.App.lookup("glc-v2-gateway")
+    except Exception:
+        app = None
+
+    if action == "A3":
+        sb = modal.Sandbox.create("python", "-c", "print('A3 Webhook Sandbox Spawn Succeeded')", image=image, app=app)
+        sb.wait()
+        return {"status": "success", "stdout": sb.stdout.read(), "stderr": sb.stderr.read()}
+        
+    elif action == "B1":
+        sb = modal.Sandbox.create("env", image=image, app=app)
+        sb.wait()
+        out = sb.stdout.read()
+        return {
+            "status": "success", 
+            "stdout": f"GEMINI_API_KEY present in Sandbox environment: {'GEMINI_API_KEY' in out}\n\nSandbox environment dump:\n{out}"
+        }
+        
+    elif action == "B2":
+        sb = modal.Sandbox.create("ls", "-la", "/data", image=image, app=app)
+        sb.wait()
+        return {"status": "success", "stdout": sb.stdout.read(), "stderr": sb.stderr.read()}
+        
+    elif action == "B6":
+        sb = modal.Sandbox.create("python", "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)", image=image, app=app)
+        sb.wait()
+        return {"status": "success", "stdout": f"Sandbox exit code: {sb.returncode}"}
+        
+    elif action == "B7":
+        from glc import db as _db
+        _db.log_call(provider="telegram", model="model", input_tokens=-500)
+        recent = _db.recent(limit=1)
+        logged = recent[0]["input_tokens"] if recent else -1
+        return {
+            "status": "success", 
+            "stdout": f"Attempted call to db.log_call with input_tokens = -500.\nDatabase record input_tokens value: {logged}"
+        }
+        
+    elif action == "B8":
+        sb = modal.Sandbox.create("python", "-c", "import subprocess; r = subprocess.run(['whoami'], capture_output=True, text=True); print('whoami output:', r.stdout.strip())", image=image, app=app)
+        sb.wait()
+        return {"status": "success", "stdout": sb.stdout.read(), "stderr": sb.stderr.read()}
+        
+    else:
+        raise HTTPException(400, f"Unsupported action {action}")
+

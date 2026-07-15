@@ -96,6 +96,18 @@ def log_call(
     session=None,
     retries=0,
 ) -> None:
+    # Input validation to prevent cost-ledger poisoning (Leak 10 / Invariant 7)
+    if not isinstance(provider, str) or not provider:
+        raise ValueError("Invalid provider name")
+    if not isinstance(model, str) or not model:
+        raise ValueError("Invalid model name")
+    if not isinstance(input_tokens, int) or input_tokens < 0:
+        input_tokens = 0
+    if not isinstance(output_tokens, int) or output_tokens < 0:
+        output_tokens = 0
+    if not isinstance(latency_ms, int) or latency_ms < 0:
+        latency_ms = 0
+
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,

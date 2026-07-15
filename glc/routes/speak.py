@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from glc.security.auth import require_install_token
+from glc.security.rate_limits import enforce_data_plane_limits
 from glc.voice.tts import TTSError, synthesize
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_install_token), Depends(enforce_data_plane_limits)])
 
 
 class SpeakRequest(BaseModel):

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
+
+from fastapi import HTTPException, Request
 
 
 @dataclass
@@ -84,3 +86,71 @@ def get_rate_limiter() -> RateLimiter:
         _limiter = RateLimiter()
         _limiter.configure_from_yaml(load_channels())
     return _limiter
+
+
+class EndpointRateLimiter:
+    def __init__(self) -> None:
+        self._state: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def check_limit(self, endpoint: str, rpm: int) -> bool:
+        with self._lock:
+            dq = self._state[endpoint]
+            now = time.time()
+            _gc(dq, now - 60)
+            if len(dq) >= rpm:
+                return False
+            dq.append(now)
+            return True
+
+
+_endpoint_limiter: EndpointRateLimiter | None = None
+
+
+def get_endpoint_limiter() -> EndpointRateLimiter:
+    global _endpoint_limiter
+    if _endpoint_limiter is None:
+        _endpoint_limiter = EndpointRateLimiter()
+    return _endpoint_limiter
+
+
+# Daily budget in total tokens processed by the gateway (Leak 10 / Invariant 8)
+MAX_DAILY_TOKENS = 5_000_000
+
+
+async def enforce_data_plane_limits(request: Request) -> None:
+    # Resolve the endpoint path (e.g. "/v1/chat")
+    path = request.url.path
+
+    # 1. Enforce Per-Endpoint Rate Limit
+    # Set default limits: /v1/chat -> 60 RPM, /v1/chat/batch -> 20 RPM, transcribe/speak -> 30 RPM
+    rpm = 60
+    if "batch" in path:
+        rpm = 20
+    elif "speak" in path or "transcribe" in path:
+        rpm = 30
+    elif "embed" in path or "vision" in path:
+        rpm = 60
+
+    if not get_endpoint_limiter().check_limit(path, rpm):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded for {path}: max {rpm} requests per minute",
+        )
+
+    # 2. Enforce Daily Token Budget
+    from glc import db
+
+    try:
+        agg = db.aggregate()
+        total_tokens = 0
+        for info in agg.values():
+            total_tokens += (info.get("in_tok") or 0) + (info.get("out_tok") or 0)
+        if total_tokens > MAX_DAILY_TOKENS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Daily token budget exceeded: max {MAX_DAILY_TOKENS} tokens per day",
+            )
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
