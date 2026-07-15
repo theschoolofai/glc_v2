@@ -26,7 +26,7 @@ import time
 from collections import deque
 from typing import Literal
 
-import httpx
+from glc import http_client as _http
 
 TaskType = Literal["retrieval_document", "retrieval_query"]
 EMBED_DIM = 768  # both providers are pinned to this
@@ -138,8 +138,8 @@ class OllamaEmbedder(EmbeddingProvider):
         # nomic-embed-text requires a task prefix for retrieval quality.
         prefix = "search_query: " if task_type == "retrieval_query" else "search_document: "
         body = {"model": self.model, "prompt": prefix + text}
-        async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.post(f"{self.base_url}/api/embeddings", json=body)
+        async with _http.pooled() as c:
+            r = await c.post(f"{self.base_url}/api/embeddings", json=body, timeout=60)
         if r.status_code != 200:
             raise EmbedderError(f"ollama HTTP {r.status_code}: {r.text[:200]}", status=r.status_code)
         d = r.json()
@@ -175,8 +175,8 @@ class GeminiEmbedder(EmbeddingProvider):
             "taskType": self._TASK_MAP[task_type],
             "outputDimensionality": self.output_dim,
         }
-        async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.post(url, json=body)
+        async with _http.pooled() as c:
+            r = await c.post(url, json=body, timeout=60)
         if r.status_code != 200:
             raise EmbedderError(f"gemini HTTP {r.status_code}: {r.text[:200]}", status=r.status_code)
         d = r.json()

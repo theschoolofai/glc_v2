@@ -423,7 +423,13 @@ async def chat(req: ChatRequest, request: Request):
 
                 async def gen():
                     try:
-                        agg = []
+                        # Track only the running length, not the whole response.
+                        # Buffering every chunk here would hold the entire
+                        # generation in RAM even though it is already streamed to
+                        # the client — an O(response) memory cost that OOM-kills a
+                        # low-footprint edge node on long outputs. Length is all
+                        # the ledger needs.
+                        resp_chars = 0
                         async for chunk in provider.stream(
                             messages,
                             max_tokens=req.max_tokens,
@@ -436,12 +442,11 @@ async def chat(req: ChatRequest, request: Request):
                             system_blocks=system_blocks,
                             cache_system=bool(req.cache_system),
                         ):
-                            agg.append(chunk)
+                            resp_chars += len(chunk)
                             if chunk.startswith("[[TOOL_CALL_DELTA]]"):
                                 yield f"data: {json.dumps({'provider': name, 'tool_call_delta': chunk[len('[[TOOL_CALL_DELTA]] ') :]})}\n\n"
                             else:
                                 yield f"data: {json.dumps({'provider': name, 'delta': chunk})}\n\n"
-                        text = "".join(agg)
                         latency = int((time.time() - t0) * 1000)
                         db.log_call(
                             provider=name,
@@ -449,7 +454,7 @@ async def chat(req: ChatRequest, request: Request):
                             latency_ms=latency,
                             status="ok",
                             prompt_chars=len(prompt_text),
-                            response_chars=len(text),
+                            response_chars=resp_chars,
                             override=req.provider,
                             attempted=_attempts_str(all_attempts),
                             agent=req.agent,
@@ -828,6 +833,13 @@ async def routers(request: Request):
     }
 
 
+MAX_CALLS_LIMIT = int(os.getenv("GLC_MAX_CALLS_LIMIT", "1000"))
+
+
 @router.get("/v1/calls")
 async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
+    # Clamp the caller-supplied limit. Unbounded, it materialises every ledger
+    # row as a dict in memory — a low-footprint edge node OOMs long before a
+    # workstation would. 1 <= limit <= MAX_CALLS_LIMIT.
+    limit = max(1, min(limit, MAX_CALLS_LIMIT))
     return db.recent(limit=limit, provider=provider, status=status)

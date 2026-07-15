@@ -29,7 +29,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
+from glc import http_client as _http
 
 # ────────────────────────────────────────────────────────────────────────────
 # V9 multimodal helpers
@@ -411,20 +411,26 @@ class OpenAICompatProvider(BaseProvider):
         self._apply_response_format(body, response_format)
         reasoning_applied = self._apply_reasoning(body, reasoning, m)
 
-        async with httpx.AsyncClient(timeout=180) as c:
-            r = await c.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
+        async with _http.pooled() as c:
+            r = await c.post(
+                f"{self.base_url}/chat/completions", headers=self._headers(), json=body, timeout=180
+            )
             if r.status_code != 200:
                 # Some providers reject reasoning_effort or strict json_schema — retry without them.
                 txt = r.text
                 if reasoning_applied and "reasoning_effort" in txt:
                     body.pop("reasoning_effort", None)
                     reasoning_applied = False
-                    r = await c.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
+                    r = await c.post(
+                        f"{self.base_url}/chat/completions", headers=self._headers(), json=body, timeout=180
+                    )
                 if r.status_code != 200 and "json_schema" in (body.get("response_format") or {}).get(
                     "type", ""
                 ):
                     body["response_format"] = {"type": "json_object"}
-                    r = await c.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
+                    r = await c.post(
+                        f"{self.base_url}/chat/completions", headers=self._headers(), json=body, timeout=180
+                    )
                 # V9: github / azure-openai-flavoured surfaces refuse
                 # response_format=json_object unless the literal word "json"
                 # appears in `messages`. Inject a one-line hint into the
@@ -448,7 +454,9 @@ class OpenAICompatProvider(BaseProvider):
                             },
                         )
                     body["messages"] = _msgs
-                    r = await c.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
+                    r = await c.post(
+                        f"{self.base_url}/chat/completions", headers=self._headers(), json=body, timeout=180
+                    )
                 if r.status_code != 200:
                     raise ProviderError(
                         f"{self.name} HTTP {r.status_code}: {r.text[:300]}",
@@ -521,9 +529,9 @@ class OpenAICompatProvider(BaseProvider):
                 body["tool_choice"] = tool_choice if isinstance(tool_choice, (str, dict)) else "auto"
         self._apply_response_format(body, response_format)
         self._apply_reasoning(body, reasoning, m)
-        async with httpx.AsyncClient(timeout=180) as c:
+        async with _http.pooled() as c:
             async with c.stream(
-                "POST", f"{self.base_url}/chat/completions", headers=self._headers(), json=body
+                "POST", f"{self.base_url}/chat/completions", headers=self._headers(), json=body, timeout=180
             ) as r:
                 if r.status_code != 200:
                     text = (await r.aread()).decode("utf-8", "ignore")[:300]
@@ -764,8 +772,8 @@ class GeminiProvider(BaseProvider):
                 reasoning_applied = True
 
         url = f"{self.base_url}/models/{m}:generateContent?key={self.api_key}"
-        async with httpx.AsyncClient(timeout=180) as c:
-            r = await c.post(url, json=body)
+        async with _http.pooled() as c:
+            r = await c.post(url, json=body, timeout=180)
             if r.status_code != 200:
                 # Retry stripping thinkingConfig / cachedContent on 400.
                 if r.status_code == 400:
@@ -778,7 +786,7 @@ class GeminiProvider(BaseProvider):
                             body["systemInstruction"] = {"parts": [{"text": system_text}]}
                         cache_name = None
                         cache_read_tokens = 0
-                    r = await c.post(url, json=body)
+                    r = await c.post(url, json=body, timeout=180)
                 if r.status_code != 200:
                     raise ProviderError(
                         f"gemini HTTP {r.status_code}: {r.text[:400]}",
@@ -1057,8 +1065,8 @@ class OllamaProvider(BaseProvider):
             elif rf.get("type") == "json_object":
                 body["format"] = "json"
 
-        async with httpx.AsyncClient(timeout=600) as c:
-            r = await c.post(f"{self.base_url}/api/chat", json=body)
+        async with _http.pooled() as c:
+            r = await c.post(f"{self.base_url}/api/chat", json=body, timeout=600)
             if r.status_code != 200:
                 raise ProviderError(f"ollama HTTP {r.status_code}: {r.text[:300]}", status=r.status_code)
             d = r.json()

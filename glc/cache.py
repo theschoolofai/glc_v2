@@ -9,18 +9,37 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 
-import httpx
+from glc import http_client as _http
+
+# Bound the in-memory map. Expired entries are otherwise reclaimed only when
+# their exact key is queried again, so a long-running gateway seeing many
+# distinct system prompts leaks entries forever — a slow OOM on a low-footprint
+# edge node. Cap the map and evict the soonest-to-expire entries past the cap.
+MAX_CACHE_ENTRIES = int(os.getenv("GLC_MAX_CACHE_ENTRIES", "512"))
 
 
 class GeminiCache:
     """Maps SHA-256(system_text) -> (cache_resource_name, expires_at)."""
 
-    def __init__(self, ttl_seconds: int = 300):
+    def __init__(self, ttl_seconds: int = 300, max_entries: int = MAX_CACHE_ENTRIES):
         self.ttl = ttl_seconds
+        self.max_entries = max(1, max_entries)
         self._store: dict[str, tuple[str, float]] = {}
         self._lock = asyncio.Lock()
+
+    def _evict_locked(self, now: float) -> None:
+        """Drop expired entries; if still over cap, evict soonest-to-expire.
+        Caller must hold self._lock."""
+        for k in [k for k, (_, exp) in self._store.items() if exp <= now]:
+            self._store.pop(k, None)
+        if len(self._store) > self.max_entries:
+            for k, _ in sorted(self._store.items(), key=lambda kv: kv[1][1])[
+                : len(self._store) - self.max_entries
+            ]:
+                self._store.pop(k, None)
 
     @staticmethod
     def _key(model: str, text: str) -> str:
@@ -53,8 +72,8 @@ class GeminiCache:
             "ttl": f"{self.ttl}s",
         }
         try:
-            async with httpx.AsyncClient(timeout=60) as c:
-                r = await c.post(url, json=body)
+            async with _http.pooled() as c:
+                r = await c.post(url, json=body, timeout=60)
                 if r.status_code != 200:
                     return None, 0
                 d = r.json()
@@ -65,6 +84,7 @@ class GeminiCache:
                     return None, 0
                 async with self._lock:
                     self._store[key] = (name, now + self.ttl)
+                    self._evict_locked(now)
                 return name, tokens
         except Exception:
             return None, 0

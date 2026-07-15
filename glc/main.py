@@ -20,6 +20,7 @@ load_dotenv(ROOT.parent / ".env")  # repo .env, if present
 
 from glc import db  # noqa: E402
 from glc import embedders as E  # noqa: E402
+from glc import http_client as _http  # noqa: E402
 from glc import providers as P  # noqa: E402
 from glc.audit import init_store as init_audit  # noqa: E402
 from glc.cache import GeminiCache  # noqa: E402
@@ -71,6 +72,9 @@ async def lifespan(app: FastAPI):
     app.state.started_at = time.time()
     app.state.registered_channels = []
     yield
+    # Close the shared pooled HTTP client so keep-alive sockets are released
+    # cleanly on shutdown (matters on constrained edge hosts).
+    await _http.aclose()
 
 
 app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
