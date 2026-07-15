@@ -112,6 +112,24 @@ def test_leak10_log_call_rejects_huge_tokens():
         db.log_call(provider="gemini", model="x", input_tokens=999_999_999, agent="victim")
 
 
+def test_c5_daily_token_budget_requires_record_usage():
+    """Budgets only fire after record_usage — not check_request alone."""
+    from glc.security import data_plane_limits as dpl
+
+    dpl._limiter = dpl.DataPlaneLimiter(
+        requests_per_minute=10_000,
+        max_tokens_per_day=100,
+        max_cost_usd_per_day=1000.0,
+    )
+    key = "tok-fingerprint-abc"
+    ok, _ = dpl.get_data_plane_limiter().check_request(key)
+    assert ok
+    dpl.get_data_plane_limiter().record_usage(key, tokens=150, cost_usd=0.0)
+    ok, why = dpl.get_data_plane_limiter().check_request(key)
+    assert not ok
+    assert "token budget" in why
+
+
 def test_leak1_environ_scrub_removes_provider_keys(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "mock-secret-value")
     vault_provider_keys()

@@ -81,6 +81,31 @@ class DataPlaneLimiter:
             b.cost_usd += max(0.0, float(cost_usd))
 
 
+def client_key_from_auth_and_host(authorization: str | None, client_host: str | None) -> str:
+    """Same keying as the data-plane middleware (token fingerprint, else IP)."""
+    auth = authorization or ""
+    if auth:
+        return auth[-16:]
+    return client_host or "unknown"
+
+
+def client_key_from_request(request) -> str:
+    auth = request.headers.get("authorization") if hasattr(request, "headers") else None
+    host = None
+    if getattr(request, "client", None) is not None:
+        host = request.client.host
+    return client_key_from_auth_and_host(auth, host)
+
+
+def record_request_usage(request, *, tokens: int = 0, cost_usd: float = 0.0) -> None:
+    """Accumulate post-call usage so daily budgets in check_request() can fire."""
+    get_data_plane_limiter().record_usage(
+        client_key_from_request(request),
+        tokens=tokens,
+        cost_usd=cost_usd,
+    )
+
+
 _limiter: DataPlaneLimiter | None = None
 
 

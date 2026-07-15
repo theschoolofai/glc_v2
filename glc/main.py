@@ -32,7 +32,7 @@ from glc.routes import speak as speak_route  # noqa: E402
 from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
 from glc.security.auth import DataPlaneAuthMiddleware, docs_enabled  # noqa: E402
-from glc.security.data_plane_limits import get_data_plane_limiter  # noqa: E402
+from glc.security.data_plane_limits import client_key_from_auth_and_host, get_data_plane_limiter  # noqa: E402
 from glc.security.isolation import scrub_provider_keys_from_environ  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
@@ -106,9 +106,8 @@ async def data_plane_rate_limit(request: Request, call_next):
     )
     if protected and request.method == "POST":
         client = request.client.host if request.client else "unknown"
-        # Prefer token fingerprint over IP so shared NATs don't collide unfairly.
         auth = request.headers.get("authorization") or ""
-        key = auth[-16:] if auth else client
+        key = client_key_from_auth_and_host(auth, client)
         ok, why = get_data_plane_limiter().check_request(key)
         if not ok:
             return JSONResponse(status_code=429, content={"detail": why})

@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from glc.security.data_plane_limits import record_request_usage
 from glc.voice.stt import STTError, transcribe
 
 router = APIRouter()
@@ -29,7 +30,7 @@ class TranscribeResponse(BaseModel):
 
 
 @router.post("/v1/transcribe", response_model=TranscribeResponse)
-async def transcribe_route(req: TranscribeRequest):
+async def transcribe_route(req: TranscribeRequest, request: Request):
     try:
         audio = base64.b64decode(req.audio_b64)
     except Exception as e:
@@ -40,6 +41,11 @@ async def transcribe_route(req: TranscribeRequest):
         if req.prefer == "streaming":
             raise HTTPException(400, str(e)) from e
         raise HTTPException(e.status or 502, str(e)) from e
+    record_request_usage(
+        request,
+        tokens=max(1, len(r.text or "") // 4),
+        cost_usd=float(r.cost_usd or 0),
+    )
     return TranscribeResponse(
         text=r.text,
         language=r.language,

@@ -35,7 +35,9 @@ from glc.llm_schemas import (
     ToolCall,
     VisionRequest,
 )
+from glc.pricing import estimate_usd
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.data_plane_limits import record_request_usage
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -463,6 +465,14 @@ async def chat(req: ChatRequest, request: Request):
                             session=req.session,
                             retries=retries,
                         )
+                        # Stream path has no provider token counts — charge a
+                        # conservative character-based estimate so budgets still move.
+                        est_tokens = max(1, (len(prompt_text) + len(text)) // 4)
+                        record_request_usage(
+                            request,
+                            tokens=est_tokens,
+                            cost_usd=estimate_usd(name, est_tokens, 0),
+                        )
                         yield f"data: {json.dumps({'done': True, 'provider': name})}\n\n"
                     except Exception as e:
                         db.log_call(
@@ -571,6 +581,13 @@ async def chat(req: ChatRequest, request: Request):
                 agent=req.agent,
                 session=req.session,
                 retries=retries,
+            )
+            in_tok = int(result["input_tokens"] or 0)
+            out_tok = int(result["output_tokens"] or 0)
+            record_request_usage(
+                request,
+                tokens=in_tok + out_tok,
+                cost_usd=estimate_usd(name, in_tok, out_tok),
             )
             return ChatResponse(
                 provider=name,
@@ -742,6 +759,9 @@ async def embed(req: EmbedRequest, request: Request):
         call_role="embed",
         embed_dim=result["dim"],
     )
+    # Embeds: charge prompt-size estimate (no provider token field in this path).
+    est_tokens = max(1, len(req.text) // 4)
+    record_request_usage(request, tokens=est_tokens, cost_usd=estimate_usd(name, est_tokens, 0))
     return EmbedResponse(
         provider=name,
         model=result["model"],
