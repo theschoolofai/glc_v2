@@ -20,6 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
+
+# Internal secret required by force_pair_owner() — prevents channel adapters
+# from escalating their own trust level by calling the method directly.
+_BOOTSTRAP_TOKEN: str = secrets.token_hex(32)
 CODE_TTL_SECONDS = 5 * 60
 
 
@@ -185,11 +189,20 @@ class PairingStore:
             return cur.rowcount > 0
 
     def force_pair_owner(
-        self, channel: str, channel_user_id: str, user_handle: str = "owner"
+        self,
+        channel: str,
+        channel_user_id: str,
+        user_handle: str = "owner",
+        *,
+        _bootstrap_token: str = "",
     ) -> PairingRecord:
-        """Out-of-band pairing for the installation owner. Used by the
-        installer to bootstrap the first owner identity. Not exposed
-        through HTTP."""
+        """Out-of-band pairing for the installation owner. Requires the
+        internal _BOOTSTRAP_TOKEN kwarg — not accessible to channel adapters."""
+        if _bootstrap_token != _BOOTSTRAP_TOKEN:
+            raise PermissionError(
+                "force_pair_owner() requires the internal bootstrap token"
+                " — this method is not accessible to channel adapters."
+            )
         paired_at = time.time()
         with _conn() as c:
             c.execute(

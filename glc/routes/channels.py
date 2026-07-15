@@ -18,8 +18,10 @@ import hmac
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse, PlainTextResponse
+
+_MAX_REGISTERED_CHANNELS = 1_000
 
 from glc.audit import append as audit_append
 from glc.channels import registry
@@ -33,24 +35,33 @@ router = APIRouter()
 
 
 @router.websocket("/v1/channels/{name}")
-async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+async def channel_ws(websocket: WebSocket, name: str):
+    # C3: token accepted only via Authorization header — never via query string
+    # (query-string tokens appear in access logs and proxy logs in plaintext)
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
-        presented = token
     expected = get_or_create_install_token()
-    if presented != expected:
+    if not presented or not hmac.compare_digest(presented, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     await websocket.accept()
     state = websocket.app.state
-    registered = list(getattr(state, "registered_channels", []))
-    if name not in registered:
+
+    # Track per-channel connection counts (ref-counted so cleanup is correct
+    # when multiple WS connections share the same channel name).
+    counts = dict(getattr(state, "_channel_conn_counts", {}))
+    if name not in counts:
+        registered = list(getattr(state, "registered_channels", []))
+        if len(registered) >= _MAX_REGISTERED_CHANNELS:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
         registered.append(name)
         state.registered_channels = registered
+    counts[name] = counts.get(name, 0) + 1
+    state._channel_conn_counts = counts
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
@@ -65,6 +76,19 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # Leak 9 fix: reject envelopes whose declared channel does not
+            # match the WebSocket route — prevents cross-channel spoofing.
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id or "unknown",
+                    trust_level="untrusted",
+                    event_type="channel_spoof_attempt",
+                    result={"declared": env.channel, "route": name},
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
 
             ok, why = allowed(
                 env.channel,
@@ -115,7 +139,16 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             )
             await websocket.send_text(reply.model_dump_json())
     except WebSocketDisconnect:
-        return
+        pass
+    finally:
+        counts = dict(getattr(state, "_channel_conn_counts", {}))
+        counts[name] = max(0, counts.get(name, 1) - 1)
+        state._channel_conn_counts = counts
+        if counts[name] == 0:
+            registered = list(getattr(state, "registered_channels", []))
+            if name in registered:
+                registered.remove(name)
+                state.registered_channels = registered
 
 
 @router.get("/v1/channels/{name}/webhook")
@@ -193,3 +226,8 @@ async def channel_webhook(name: str, request: Request):
     )
     await adapter.send(reply)
     return {"status": "ok"}
+
+
+def _check_channel_match(env_channel: str, route_name: str) -> bool:
+    """Returns True when the envelope channel matches the route (no spoof)."""
+    return env_channel == route_name
