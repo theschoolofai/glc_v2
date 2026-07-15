@@ -18,6 +18,8 @@ from pathlib import Path
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 DB_PATH = os.getenv("GLC_GATEWAY_DB", str(DEFAULT_DIR / "gateway.sqlite"))
 
+_MAX_TOKENS_PER_CALL = 1_000_000
+
 
 def _ensure_parent() -> None:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -96,6 +98,8 @@ def log_call(
     session=None,
     retries=0,
 ) -> None:
+    input_tokens = min(input_tokens, _MAX_TOKENS_PER_CALL)
+    output_tokens = min(output_tokens, _MAX_TOKENS_PER_CALL)
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,
