@@ -79,7 +79,9 @@ class Provider(TTSProvider):
             )
 
         # ---- Live path: call the real Cartesia API ----
-        api_key = os.getenv("CARTESIA_API_KEY")
+        from glc.security.isolation import provider_key
+
+        api_key = provider_key("CARTESIA_API_KEY")
         if not api_key:
             raise TTSError("CARTESIA_API_KEY is not set", status=500)
 

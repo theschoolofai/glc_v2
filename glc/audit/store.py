@@ -46,6 +46,22 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 def init_store() -> None:
     with _conn() as c:
         c.executescript(_SCHEMA_PATH.read_text())
+        # Leak 2: enforce append-only at the SQLite layer (app already exposes
+        # only append()). Adapters that open the file still hit these triggers.
+        c.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+            BEFORE UPDATE ON audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_log is append-only');
+            END;
+            CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+            BEFORE DELETE ON audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_log is append-only');
+            END;
+            """
+        )
 
 
 def _jsonify(v: Any) -> str | None:

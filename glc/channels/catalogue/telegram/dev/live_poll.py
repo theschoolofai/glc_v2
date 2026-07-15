@@ -53,7 +53,7 @@ async def main() -> None:
     adapter = Adapter()
 
     # WebSocket URL
-    ws_url = f"ws://localhost:{gateway_port}/v1/channels/telegram?token={install_token}"
+    ws_url = f"ws://localhost:{gateway_port}/v1/channels/telegram"
 
     print(f"Connecting to GLC Gateway WebSocket at: ws://localhost:{gateway_port}/v1/channels/telegram")
 
@@ -64,7 +64,9 @@ async def main() -> None:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets"])
         import websockets
 
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(
+        ws_url, additional_headers={"Authorization": f"Bearer {install_token}"}
+    ) as ws:
         print("Connected to GLC Gateway WebSocket!")
         offset = 0
 

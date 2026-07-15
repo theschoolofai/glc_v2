@@ -32,7 +32,14 @@ class Provider(TTSProvider):
         with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as f:
             out = Path(f.name)
         try:
-            subprocess.run(["say", "-o", str(out), text], check=True)
+            from glc.security.isolation import subprocess_allowed
+
+            if not subprocess_allowed("say"):
+                raise TTSError(
+                    "subprocess execution is disabled "
+                    "(set GLC_ALLOW_SUBPROCESS=1 and allowlist 'say')"
+                )
+            subprocess.run(["say", "-o", str(out), text], check=True, shell=False)
             data = out.read_bytes()
         finally:
             out.unlink(missing_ok=True)

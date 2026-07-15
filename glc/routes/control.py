@@ -14,18 +14,17 @@ import time
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from glc.config import get_or_create_install_token
+from glc.security.auth import extract_bearer, verify_install_token
+from glc.security.data_plane_limits import get_pairing_confirm_limiter
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
 
 router = APIRouter()
 
 
 def _require_token(authorization: str | None) -> None:
-    expected = get_or_create_install_token()
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
-    presented = authorization.removeprefix("Bearer ").strip()
-    if presented != expected:
+    if not verify_install_token(extract_bearer(authorization)):
         raise HTTPException(403, "install token mismatch")
 
 
@@ -61,8 +60,17 @@ async def pair(req: PairRequest, authorization: str | None = Header(default=None
 
 
 @router.post("/v1/control/pair/confirm")
-async def pair_confirm(req: PairConfirmRequest, authorization: str | None = Header(default=None)):
+async def pair_confirm(
+    req: PairConfirmRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
     _require_token(authorization)
+    # C6: rate-limit confirm attempts (6-digit codes are small search spaces).
+    client = request.client.host if request.client else "unknown"
+    ok, why = get_pairing_confirm_limiter().check(client)
+    if not ok:
+        raise HTTPException(429, why)
     rec = get_pairing_store().confirm_code(req.code)
     if rec is None:
         raise HTTPException(404, "code unknown or expired")

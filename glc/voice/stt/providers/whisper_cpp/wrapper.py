@@ -69,11 +69,20 @@ def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str
         if use_vad:
             cmd.extend(["-nth", str(VAD_THRESHOLD)])
 
+        from glc.security.isolation import subprocess_allowed
+
+        # Leak 7: subprocess disabled by default; opt in with GLC_ALLOW_SUBPROCESS=1.
+        if not subprocess_allowed(cli):
+            raise RuntimeError(
+                "subprocess execution is disabled (set GLC_ALLOW_SUBPROCESS=1 and "
+                "list the binary in GLC_SUBPROCESS_ALLOWLIST to enable whisper-cli)"
+            )
         out = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             check=True,
+            shell=False,
         )
     finally:
         audio_path.unlink(missing_ok=True)

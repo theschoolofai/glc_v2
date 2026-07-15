@@ -34,7 +34,9 @@ class Provider(TTSProvider):
 
     def __init__(self, config: dict | None = None) -> None:
         super().__init__(config)
-        self._api_key: str = os.environ.get("ELEVENLABS_API_KEY", "")
+        from glc.security.isolation import provider_key
+
+        self._api_key: str = provider_key("ELEVENLABS_API_KEY") or ""
         self._voice_id: str = os.environ.get("ELEVENLABS_VOICE_ID", DEFAULT_VOICE_ID)
 
     async def synthesize(self, text: str, voice_id: str | None = None) -> SynthesizeResult:

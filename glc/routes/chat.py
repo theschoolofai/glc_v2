@@ -288,22 +288,22 @@ def _required_caps(req: ChatRequest):
 async def _resolve_image_urls(messages):
     import base64
 
-    import httpx as _httpx
+    from glc.security.ssrf import fetch_bytes_safe
 
     async def _fetch_to_data_url(url: str) -> str:
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        try:
+            content, mt = await fetch_bytes_safe(url, timeout=30.0, headers=headers)
+        except Exception as e:
+            # C4: do not echo upstream/network detail that aids recon.
+            raise HTTPException(400, "failed to fetch image url") from e
+        if not mt.startswith("image/") and mt not in ("application/octet-stream",):
+            raise HTTPException(400, "URL did not return an image")
+        b64 = base64.b64encode(content).decode()
+        return f"data:{mt};base64,{b64}"
 
     out = []
     for m in messages:
@@ -330,6 +330,13 @@ async def _resolve_image_urls(messages):
         else:
             out.append(m)
     return out
+
+
+def _client_provider_error(status: int, *, retryable: bool = True) -> HTTPException:
+    """C4 — generic client-facing error; detail stays in server logs / ledger."""
+    if status == 502:
+        return HTTPException(502, "upstream provider failed")
+    return HTTPException(503, "all providers unavailable")
 
 
 def _validate_structured(text: str, schema: dict):
@@ -471,7 +478,8 @@ async def chat(req: ChatRequest, request: Request):
                             session=req.session,
                             retries=retries,
                         )
-                        yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
+                        print(f"[glc.chat] stream error: {e!r}")
+                        yield f"data: {json.dumps({'error': 'upstream provider failed'})}\n\n"
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -604,8 +612,9 @@ async def chat(req: ChatRequest, request: Request):
             if secs > 0:
                 tag += f" → backoff {secs:.0f}s ({reason})"
             all_attempts.append({"provider": name, "reason": tag})
+            print(f"[glc.chat] provider {name} failed: {e!r}")
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise _client_provider_error(502)
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
@@ -629,12 +638,14 @@ async def chat(req: ChatRequest, request: Request):
                 retries=retries,
             )
             all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
+            print(f"[glc.chat] provider {name} exception: {e!r}")
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise _client_provider_error(502)
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    print(f"[glc.chat] all providers unavailable: {all_attempts!r} last={last_err!r}")
+    raise _client_provider_error(503)
 
 
 @router.post("/v1/chat/batch")
@@ -648,7 +659,8 @@ async def chat_batch(req: BatchChatRequest, request: Request):
             except HTTPException as he:
                 return {"error": str(he.detail), "status_code": he.status_code}
             except Exception as e:
-                return {"error": str(e)[:400], "status_code": 500}
+                print(f"[glc.chat] batch item failed: {e!r}")
+                return {"error": "internal error", "status_code": 500}
 
     results = await _asyncio.gather(*[_one(c) for c in req.calls])
     return {"results": results}
@@ -710,13 +722,14 @@ async def embed(req: EmbedRequest, request: Request):
             override=req.provider,
             call_role="embed",
         )
+        print(f"[glc.embed] failed: {e!r}")
         if req.provider:
             if e.status == 429:
-                raise HTTPException(429, f"{req.provider} rate-limited: {e}")
+                raise HTTPException(429, "embedder rate-limited")
             if e.status == 400:
-                raise HTTPException(400, str(e))
-            raise HTTPException(502, f"{req.provider} embed failed: {e}")
-        raise HTTPException(503, str(e))
+                raise HTTPException(400, "invalid embed request")
+            raise HTTPException(502, "upstream embedder failed")
+        raise HTTPException(503, "all embedders unavailable")
 
     db.log_call(
         provider=name,

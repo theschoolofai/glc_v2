@@ -165,5 +165,22 @@ def reload_engine() -> None:
     eng.reload(policy_yaml_path())
 
 
-def evaluate(tool_call: dict[str, Any], context: dict[str, Any]) -> PolicyVerdict:
+def _evaluate_impl(tool_call: dict[str, Any], context: dict[str, Any]) -> PolicyVerdict:
     return get_engine().evaluate(tool_call, context)
+
+
+# Leak 5: keep a sealed reference to the real implementation. Dispatchers
+# should call safe_evaluate(), which denies if the module attribute was rebound.
+_SEALED_EVALUATE = _evaluate_impl
+evaluate = _evaluate_impl
+
+
+def safe_evaluate(tool_call: dict[str, Any], context: dict[str, Any]) -> PolicyVerdict:
+    """Deny-closed evaluate that detects monkey-patching of glc.policy.engine.evaluate."""
+    import glc.policy.engine as mod
+
+    if mod.evaluate is not _SEALED_EVALUATE and getattr(mod.evaluate, "__code__", None) is not getattr(
+        _SEALED_EVALUATE, "__code__", None
+    ):
+        return PolicyVerdict(action="deny", reason="policy engine tampered — denying")
+    return _SEALED_EVALUATE(tool_call, context)

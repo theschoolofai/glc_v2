@@ -95,7 +95,45 @@ def log_call(
     agent=None,
     session=None,
     retries=0,
+    *,
+    _signature: str | None = None,
 ) -> None:
+    """Append a cost-ledger row.
+
+    Leak 10: hard-cap token counts and require gateway role. Callers inside
+    glc.routes may omit _signature; external / adapter callers must pass a
+    HMAC from glc.security.isolation.sign_ledger_write.
+    """
+    from glc.security.isolation import (
+        MAX_INPUT_TOKENS,
+        MAX_OUTPUT_TOKENS,
+        assert_gateway_role,
+        verify_ledger_write,
+    )
+
+    assert_gateway_role("log_call")
+    input_tokens = int(input_tokens or 0)
+    output_tokens = int(output_tokens or 0)
+    if input_tokens < 0 or output_tokens < 0:
+        raise ValueError("token counts must be non-negative")
+    if input_tokens > MAX_INPUT_TOKENS or output_tokens > MAX_OUTPUT_TOKENS:
+        raise ValueError(
+            f"token counts exceed hard cap ({MAX_INPUT_TOKENS}/{MAX_OUTPUT_TOKENS})"
+        )
+    # Optional signature for callers outside the gateway route package.
+    import inspect
+
+    mod = ""
+    frame = inspect.currentframe()
+    try:
+        if frame and frame.f_back:
+            mod = frame.f_back.f_globals.get("__name__", "") or ""
+    finally:
+        del frame
+    if not mod.startswith(("glc.routes", "glc.db", "tests.")):
+        if not verify_ledger_write(provider, model, input_tokens, output_tokens, agent, _signature):
+            raise PermissionError("cost-ledger write requires a valid signature")
+
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,

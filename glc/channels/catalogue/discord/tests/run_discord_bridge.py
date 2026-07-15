@@ -118,14 +118,16 @@ async def run_bridge():
     # 1. Retrieve the GLC local install token to authorize with the GLC gateway
     install_token = get_or_create_install_token()
     glc_port = os.environ.get("GLC_PORT", "8111")
-    glc_ws_url = f"ws://localhost:{glc_port}/v1/channels/discord?token={install_token}"
+    glc_ws_url = f"ws://localhost:{glc_port}/v1/channels/discord"
 
     # 2. Instantiate client and adapter
     client = RealDiscordClient(token=bot_token)
     adapter = Adapter(config={"client": client})
 
     print("[bridge] connecting to local GLC gateway...")
-    async with websockets.connect(glc_ws_url) as glc_ws:
+    async with websockets.connect(
+        glc_ws_url, additional_headers={"Authorization": f"Bearer {install_token}"}
+    ) as glc_ws:
         print("[bridge] connected to GLC gateway. Connecting to Discord WebSocket gateway...")
 
         # 3. Connect to Discord Gateway

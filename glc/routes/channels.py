@@ -2,8 +2,8 @@
 
 Adapters connect over WebSocket and exchange JSON-serialised
 ChannelMessage and ChannelReply envelopes. The connection is gated by
-the installation token presented in the Authorization header (Sec-Websocket
-clients can pass it as a query string fallback, ?token=...).
+the installation token presented in the Authorization header only
+(query-string tokens are rejected — they land in access logs).
 
 This endpoint is the contract surface adapters speak to. The gateway
 processes incoming messages through the rate limiter, allowlist,
@@ -18,14 +18,14 @@ import hmac
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from glc.audit import append as audit_append
 from glc.channels import registry
 from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
+from glc.security.auth import extract_bearer, verify_install_token
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
 
@@ -33,15 +33,11 @@ router = APIRouter()
 
 
 @router.websocket("/v1/channels/{name}")
-async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+async def channel_ws(websocket: WebSocket, name: str):
+    # C3: header-only auth — never accept ?token= (appears in access logs / Referer).
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
-    presented = None
-    if header_auth and header_auth.startswith("Bearer "):
-        presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
-        presented = token
-    expected = get_or_create_install_token()
-    if presented != expected:
+    presented = extract_bearer(header_auth)
+    if not verify_install_token(presented):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -65,6 +61,21 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # C2 / leak 9: envelope channel must match the WebSocket route.
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="channel_spoof_rejected",
+                    result={"claimed": env.channel, "route": name},
+                )
+                await websocket.send_text(
+                    json.dumps({"error": "envelope channel does not match websocket route"})
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
 
             ok, why = allowed(
                 env.channel,
@@ -144,6 +155,17 @@ async def channel_webhook(name: str, request: Request):
     msg = await adapter.on_message(raw)
     if msg is None:
         return {"status": "ok"}
+
+    # Bound webhook envelopes to the route name the same way WS does.
+    if msg.channel != name:
+        audit_append(
+            channel=name,
+            channel_user_id=msg.channel_user_id,
+            trust_level=msg.trust_level,
+            event_type="channel_spoof_rejected",
+            result={"claimed": msg.channel, "route": name},
+        )
+        raise HTTPException(status_code=400, detail="envelope channel does not match webhook route")
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()

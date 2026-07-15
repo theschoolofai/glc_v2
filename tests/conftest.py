@@ -18,6 +18,16 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     monkeypatch.setenv("GLC_AUDIT_DB", str(tmp_path / "audit.sqlite"))
     monkeypatch.setenv("GLC_PAIRING_DB", str(tmp_path / "pairings.sqlite"))
     monkeypatch.setenv("GLC_GATEWAY_DB", str(tmp_path / "gateway.sqlite"))
+    # Installer-only elevation API; tests exercise pairing bootstrap.
+    monkeypatch.setenv("GLC_ALLOW_FORCE_PAIR", "1")
+    monkeypatch.setenv("GLC_COMPONENT_ROLE", "gateway")
+    # Local tests keep docs on and auth on (clients pass the install token).
+    monkeypatch.setenv("GLC_ENABLE_DOCS", "1")
+    # Allow local system TTS / whisper-cli in tests that need subprocess.
+    monkeypatch.setenv("GLC_ALLOW_SUBPROCESS", "1")
+    monkeypatch.setenv("GLC_SUBPROCESS_ALLOWLIST", "whisper-cli,whisper.cpp,say")
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.delenv("MODAL_CLOUD_PROVIDER", raising=False)
 
     # Reset singletons that cache config-dir at first access.
     import glc.config as _cfg
@@ -29,6 +39,10 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.security.rate_limits as _r
 
     _r._limiter = None
+    import glc.security.data_plane_limits as _d
+
+    _d._limiter = None
+    _d._pair_limiter = None
     import glc.policy.engine as _e
 
     _e._engine = None
@@ -40,7 +54,7 @@ def _isolated_glc_state(monkeypatch, tmp_path):
 
 @pytest.fixture
 def app_client():
-    """TestClient pointed at a freshly-booted glc.main:app."""
+    """TestClient pointed at a freshly-booted glc.main:app (no auth header)."""
     from fastapi.testclient import TestClient
 
     import glc.main as m
@@ -55,3 +69,15 @@ def install_token(app_client):
     from glc.config import install_token_path
 
     return install_token_path().read_text().strip()
+
+
+@pytest.fixture
+def auth_headers(install_token):
+    return {"Authorization": f"Bearer {install_token}"}
+
+
+@pytest.fixture
+def auth_client(app_client, auth_headers):
+    """TestClient with the install token attached to every request."""
+    app_client.headers.update(auth_headers)
+    return app_client

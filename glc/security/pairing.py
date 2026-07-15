@@ -189,7 +189,18 @@ class PairingStore:
     ) -> PairingRecord:
         """Out-of-band pairing for the installation owner. Used by the
         installer to bootstrap the first owner identity. Not exposed
-        through HTTP."""
+        through HTTP.
+
+        Leak 3: gated behind GLC_ALLOW_FORCE_PAIR=1 so in-process adapters
+        cannot silently elevate to owner_paired. Tests / installer set the flag.
+        """
+        if os.getenv("GLC_ALLOW_FORCE_PAIR", "0") not in ("1", "true", "True"):
+            raise PermissionError(
+                "force_pair_owner disabled; set GLC_ALLOW_FORCE_PAIR=1 from the installer only"
+            )
+        from glc.security.isolation import assert_gateway_role
+
+        assert_gateway_role("force_pair_owner")
         paired_at = time.time()
         with _conn() as c:
             c.execute(

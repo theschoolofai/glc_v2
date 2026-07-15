@@ -14,7 +14,9 @@ def test_pair_with_bad_token_is_forbidden(app_client):
         headers={"Authorization": "Bearer bogus"},
         json={"channel": "telegram", "channel_user_id": "1"},
     )
-    assert r.status_code == 403
+    # Data-plane auth middleware rejects unknown bearers with 401 before the
+    # route's finer-grained 403 can run — either status proves the bad token failed.
+    assert r.status_code in (401, 403)
 
 
 def test_pair_then_confirm_round_trip(app_client, install_token):
