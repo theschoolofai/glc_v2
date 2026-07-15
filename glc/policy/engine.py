@@ -167,3 +167,30 @@ def reload_engine() -> None:
 
 def evaluate(tool_call: dict[str, Any], context: dict[str, Any]) -> PolicyVerdict:
     return get_engine().evaluate(tool_call, context)
+
+
+# ---------------------------------------------------------------------------
+# Sealed module — prevents monkey-patching of evaluate / get_engine / reload
+# ---------------------------------------------------------------------------
+import sys as _sys
+import types as _types
+
+_SEALED_NAMES = frozenset({"evaluate", "get_engine", "reload_engine"})
+
+
+class _SealedModule(_types.ModuleType):
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in _SEALED_NAMES:
+            raise AttributeError(
+                f"[glc] {name!r} is sealed — the policy engine cannot be monkey-patched"
+            )
+        super().__setattr__(name, value)
+
+
+_mod = _SealedModule(__name__)
+_mod.__dict__.update(
+    {k: v for k, v in globals().items() if not k.startswith("__")}
+)
+_mod.__dict__["__spec__"] = globals().get("__spec__")
+_mod.__dict__["__loader__"] = globals().get("__loader__")
+_sys.modules[__name__] = _mod
