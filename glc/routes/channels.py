@@ -157,11 +157,26 @@ async def channel_webhook(name: str, request: Request):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
 
-    raw = {
-        "raw_body": await request.body(),
-        "headers": dict(request.headers),
-    }
-    msg = await adapter.on_message(raw)
+    body = await request.body()
+    headers = dict(request.headers)
+    raw: dict = {"raw_body": body, "headers": headers}
+    # Some adapters (Slack) expect the parsed Events API JSON at the top level;
+    # signature-verifying adapters keep using raw_body/headers.
+    if body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                raw = {**parsed, "raw_body": body, "headers": headers}
+        except Exception:
+            pass
+
+    try:
+        msg = await adapter.on_message(raw)
+    except Exception as e:
+        # Live finding: telegram/discord ValidationError became HTTP 500 for any
+        # anonymous junk POST — fail closed with 400 instead.
+        print(f"[glc] webhook {name} parse error: {e!r}")
+        raise HTTPException(status_code=400, detail="invalid webhook payload") from e
     if msg is None:
         return {"status": "ok"}
 

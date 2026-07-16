@@ -18,6 +18,21 @@ def test_ssrf_blocks_loopback():
         assert_public_http_url("http://localhost/x")
 
 
+def test_webhook_junk_is_400_not_500(app_client):
+    r = app_client.post("/v1/channels/telegram/webhook", json={})
+    assert r.status_code == 400
+
+
+def test_slack_rejects_empty_webhook_body():
+    import asyncio
+
+    from glc.channels.catalogue.slack.adapter import Adapter
+
+    ad = Adapter(config={})
+    msg = asyncio.run(ad.on_message({"raw_body": b"{}", "headers": {}}))
+    assert msg is None
+
+
 def test_dataplane_auth_rejects_anonymous(monkeypatch, app_client):
     monkeypatch.setenv("GLC_DATA_PLANE_AUTH", "1")
     r = app_client.post("/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]})

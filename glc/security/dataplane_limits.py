@@ -23,9 +23,12 @@ class DataPlaneRateLimitMiddleware(BaseHTTPMiddleware):
         self._lock = threading.Lock()
 
     def _client_key(self, request: Request) -> str:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
+        # Do not trust client-supplied X-Forwarded-For (spoofs RPM identity).
+        # Only honor it when GLC_TRUST_X_FORWARDED_FOR=1 behind a real proxy.
+        if os.getenv("GLC_TRUST_X_FORWARDED_FOR", "").lower() in {"1", "true", "yes"}:
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                return forwarded.split(",")[0].strip()
         if request.client:
             return request.client.host
         return "unknown"
