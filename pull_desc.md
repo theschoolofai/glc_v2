@@ -87,6 +87,26 @@ uv run pytest tests/test_security.py -k test_classifier_prompt_injection_escapin
 **The fix.** 
 This pull request XML-escapes any user input in the content sample and wraps it inside `<sample>...</sample>` tags, and updates the `ROUTER_PROMPT` system block to explicitly instruct the model to treat the sample tags strictly as data and never execute any commands found inside them.
 
+## Finding 5: Fail-Open Verification in HTTP Webhook Registration Gating
+
+**What it is.** 
+The gateway exposes a GET endpoint `/v1/channels/{name}/webhook` for adapters to confirm webhook subscriptions. However, if the verification token environment variable `{CHANNEL}_VERIFY_TOKEN` is not configured on the server, `expected` defaults to `""`. When an attacker sends a GET request with `hub.verify_token=` (empty), the comparison `hmac.compare_digest("", "")` evaluates to `True`, successfully validating the subscription bypass block and allowing attackers to register arbitrary untrusted webhook endpoints.
+
+**Invariant broken.** 
+Section 4, Invariant 1: *Private gateway endpoints must verify client identity.* (Specifically, webhook subscription validation checks).
+
+**Affected component.** 
+* `glc/routes/channels.py` (lines 141–146)
+
+**Reproduction (from a fresh checkout).**
+Run the automated test case in your terminal:
+```bash
+uv run pytest tests/test_security.py -k test_webhook_verification_fail_closed
+```
+
+**The fix.** 
+The pull request adds a validation check in `/v1/channels/{name}/webhook` to verify that `expected` is configured and non-empty. If it is empty, the endpoint fails closed immediately with an HTTP 403 Forbidden response.
+
 ---
 
 ### Checklist
