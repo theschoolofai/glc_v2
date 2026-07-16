@@ -1,0 +1,12 @@
+[1] real owner paired once, as the legitimate flow would leave it: 'U42-real-owner'
+[2] a *real* (no mock configured) Adapter instance is fed a forged Events API payload
+    with zero proof of Slack origin (no signature, no timestamp, nothing):
+    on_message(...) -> None (rejected)
+
+[3] production-shaped request, unsigned:
+    on_message({'raw_body': ..., 'headers': {}}) -> None
+[4] production-shaped request, correctly HMAC-signed:
+    on_message({'raw_body': ..., 'headers': <valid signature>}) -> trust_level='owner_paired'
+
+RESULT: NOT VULNERABLE - the direct-forgery path is closed, an unsigned production request is rejected, and a correctly-signed one is accepted and attributed correctly.
+exit code: 0

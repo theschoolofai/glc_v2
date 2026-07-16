@@ -15,12 +15,46 @@ Key Slack concepts implemented:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import os
+import time
 from datetime import UTC, datetime
 from typing import Any
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.trust_level import classify
+
+# Requests older than this are rejected even with a valid signature — a
+# captured, validly-signed body must not be replayable indefinitely. Mirrors
+# Slack's own documented guidance (5 minutes).
+_MAX_SIGNATURE_AGE_SECONDS = 5 * 60
+
+
+def verify_slack_signature(raw_body: bytes, headers: dict, *, now: float | None = None) -> bool:
+    """Verify Slack's request signature per
+    https://api.slack.com/authentication/verifying-requests-from-slack —
+    HMAC-SHA256 over "v0:{timestamp}:{raw_body}", constant-time compared,
+    with the request rejected if its timestamp is stale (replay window).
+    Fails closed: an unset SLACK_SIGNING_SECRET always returns False, never
+    treated as an implicit match (an absent secret must never trivially
+    compare-equal to an empty attacker-supplied value)."""
+    secret = os.environ.get("SLACK_SIGNING_SECRET", "")
+    sig_header = headers.get("x-slack-signature") or headers.get("X-Slack-Signature") or ""
+    ts_header = headers.get("x-slack-request-timestamp") or headers.get("X-Slack-Request-Timestamp") or ""
+    if not secret or not sig_header.startswith("v0=") or not ts_header:
+        return False
+    try:
+        ts = float(ts_header)
+    except ValueError:
+        return False
+    if abs((time.time() if now is None else now) - ts) > _MAX_SIGNATURE_AGE_SECONDS:
+        return False
+    basestring = f"v0:{ts_header}:{raw_body.decode('utf-8', errors='replace')}"
+    expected = "v0=" + hmac.new(secret.encode(), basestring.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, sig_header)
 
 
 class Adapter(ChannelAdapter):
@@ -55,8 +89,37 @@ class Adapter(ChannelAdapter):
                 arrived_at=datetime.now(UTC),
             )
 
+        if isinstance(raw, dict) and "raw_body" in raw:
+            # This is the shape glc/routes/channels.py::channel_webhook
+            # always constructs for real network traffic — the only path an
+            # external caller can actually reach. It must be HMAC-verified
+            # before any of its contents are trusted (invariant 2).
+            raw_body = raw["raw_body"]
+            if not isinstance(raw_body, bytes):
+                return None
+            headers = {k.lower(): v for k, v in (raw.get("headers") or {}).items()}
+            if not verify_slack_signature(raw_body, headers):
+                return None
+            try:
+                payload = json.loads(raw_body)
+            except json.JSONDecodeError:
+                return None
+        elif mock is not None:
+            # Test/mock harness convenience: an already-parsed dict, exactly
+            # like every other channel's mock in this repo (see
+            # whatsapp/adapter.py's equivalent branch). Only reachable when a
+            # mock is explicitly configured, i.e. never from real network
+            # input — the generic webhook route only ever calls on_message()
+            # with the raw_body/headers shape above.
+            payload = raw
+        else:
+            # No mock, no raw_body: a caller is handing this adapter a bare,
+            # unverifiable dict outside any test harness. Refuse to trust it
+            # rather than silently accepting whatever the caller claims.
+            return None
+
         # Unwrap Slack's event_callback wrapper
-        event = raw.get("event", raw)
+        event = payload.get("event", payload)
 
         user_id: str = event.get("user", "")
         text: str = event.get("text", "")
