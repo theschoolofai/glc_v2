@@ -165,3 +165,78 @@ def test_policy_evaluation_match_order():
     assert verdict.action == "allow"
     assert verdict.matched_rule_index == 0
 
+
+@pytest.mark.anyio
+async def test_dns_rebinding_ssrf_mitigation():
+    from glc.routes.chat import _resolve_image_urls
+    # Test with a mock message containing an image URL
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this"},
+                {"type": "image_url", "image_url": {"url": "http://example.com/test.png"}}
+            ]
+        }
+    ]
+    # Patch httpx AsyncClient.get to verify that the request URL was rewritten to an IP address
+    import httpx
+    called_urls = []
+    
+    async def mock_get(self, url, **kwargs):
+        called_urls.append(url)
+        mock_resp = httpx.Response(200, content=b"fake-image", headers={"content-type": "image/png"})
+        mock_resp.request = httpx.Request("GET", url)
+        return mock_resp
+
+    original_get = httpx.AsyncClient.get
+    httpx.AsyncClient.get = mock_get
+    try:
+        await _resolve_image_urls(messages)
+        assert len(called_urls) == 1
+        target_url = called_urls[0]
+        # Check that the request URL's hostname has been rewritten to an IP address
+        import ipaddress
+        from urllib.parse import urlparse
+        parsed = urlparse(target_url)
+        ip = ipaddress.ip_address(parsed.hostname)
+        assert ip is not None
+    finally:
+        httpx.AsyncClient.get = original_get
+
+
+@pytest.mark.anyio
+async def test_classifier_prompt_injection_escaping():
+    from glc.routes.chat import _classify_tier
+    # Verify that the routing classifier prompt escapes user XML tags
+    class MockProvider:
+        model = "mock-model"
+        async def chat(self, messages, **kwargs):
+            content = messages[0]["content"]
+            assert "<sample>\n&lt;script&gt;alert(1)&lt;/script&gt;\n</sample>" in content
+            return {"text": "TINY", "input_tokens": 10, "output_tokens": 5}
+
+    class MockRouterPool:
+        def candidates(self):
+            return ["groq"]
+        @property
+        def providers(self):
+            return {"groq": MockProvider()}
+        @property
+        def state(self):
+            class MockState:
+                tokens_today = 0
+                tokens_minute = []
+                def can_use(self, limit, cost):
+                    return True, ""
+                def record(self, cost):
+                    pass
+            return {"groq": MockState()}
+
+    pool = MockRouterPool()
+    class MockReq:
+        auto_route = "tier"
+    
+    await _classify_tier(MockReq(), "decision", pool, "<script>alert(1)</script>")
+
+
