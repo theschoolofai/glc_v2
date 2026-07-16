@@ -70,6 +70,15 @@ def test_log_call_rejects_poison_tokens():
         db.log_call(provider="gemini", model="x", input_tokens=999_999_999, agent="victim")
 
 
+def test_webhook_verify_rejects_empty_token(app_client, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_VERIFY_TOKEN", raising=False)
+    r = app_client.get(
+        "/v1/channels/telegram/webhook",
+        params={"hub.mode": "subscribe", "hub.verify_token": "", "hub.challenge": "abc"},
+    )
+    assert r.status_code == 403
+
+
 def test_channel_spoof_rejected(app_client, install_token):
     from datetime import datetime, timezone
 

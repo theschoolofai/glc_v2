@@ -43,7 +43,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
     expected = get_or_create_install_token()
-    if presented != expected:
+    if not presented or not hmac.compare_digest(presented, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -142,6 +142,9 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
+    # Part 2: empty/missing VERIFY_TOKEN must not authenticate (compare_digest("", "") is True).
+    if not expected or not token:
+        raise HTTPException(status_code=403)
     if mode == "subscribe" and hmac.compare_digest(token, expected):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403)
@@ -161,6 +164,17 @@ async def channel_webhook(name: str, request: Request):
     msg = await adapter.on_message(raw)
     if msg is None:
         return {"status": "ok"}
+
+    # Part 2: HTTP webhook path must match envelope channel (WS spoof was L9; this is the HTTP twin).
+    if msg.channel != name:
+        audit_append(
+            channel=name,
+            channel_user_id=msg.channel_user_id,
+            trust_level=msg.trust_level,
+            event_type="channel_spoof_reject",
+            result={"claimed": msg.channel, "path": name, "via": "webhook"},
+        )
+        raise HTTPException(status_code=403, detail="channel mismatch")
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
