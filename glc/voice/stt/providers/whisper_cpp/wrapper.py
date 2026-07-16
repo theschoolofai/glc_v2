@@ -34,6 +34,12 @@ WHISPER_BEAM_SIZE = int(os.getenv("GLC_WHISPER_BEAM_SIZE", "2"))
 
 
 def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str, str, int]:
+    # Leak 7: subprocess is opt-in so the gateway image does not shell out by default.
+    if os.getenv("GLC_ALLOW_SUBPROCESS", "").lower() not in {"1", "true", "yes"}:
+        raise RuntimeError(
+            "whisper.cpp subprocess disabled; set GLC_ALLOW_SUBPROCESS=1 on a "
+            "dedicated STT worker image, or prefer a hosted STT provider"
+        )
     cli = shutil.which("whisper-cli") or shutil.which("whisper.cpp")
     if cli is None:
         raise RuntimeError(

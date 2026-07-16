@@ -70,6 +70,24 @@ def test_log_call_rejects_poison_tokens():
         db.log_call(provider="gemini", model="x", input_tokens=999_999_999, agent="victim")
 
 
+def test_self_kill_denied(app_client):
+    import os
+    import signal
+
+    from glc.security.process_guard import install_process_guard
+
+    install_process_guard()
+    with pytest.raises(PermissionError):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def test_policy_evaluate_sealed():
+    import glc.policy.engine as eng
+
+    with pytest.raises(AttributeError):
+        eng.evaluate = lambda *a, **k: None  # type: ignore[assignment]
+
+
 def test_webhook_verify_rejects_empty_token(app_client, monkeypatch):
     monkeypatch.delenv("TELEGRAM_VERIFY_TOKEN", raising=False)
     r = app_client.get(

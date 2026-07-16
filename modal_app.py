@@ -3,7 +3,8 @@ Modal deployment wrapper for glc_v2 (Session 12).
 
 Serves glc.main:app with:
   - persistent Volume for GLC_CONFIG_DIR
-  - mock LLM Secret mounted only on the private llm_worker (not the public ASGI)
+  - install token Secret on the gateway only (leak 4)
+  - provider Secret only on llm_worker Sandbox with egress allowlist (A3/A4/L1/L6)
   - data-plane auth + docs disabled + single-container audit writer
 
   Dev:   modal serve modal_app.py
@@ -35,12 +36,13 @@ image = (
     .env(
         {
             "GLC_CONFIG_DIR": "/data/glc",
-            # A1/A2/C5: public deploy requires install-token Bearer on data plane
             "GLC_DATA_PLANE_AUTH": "1",
             "GLC_DISABLE_DOCS": "1",
             "GLC_DATA_PLANE_RPM": "30",
-            # Leak 3: installer escalation off in the cloud image
             "GLC_ALLOW_FORCE_PAIR_OWNER": "0",
+            "GLC_DENY_SELF_KILL": "1",
+            "GLC_ALLOW_SUBPROCESS": "0",
+            "GLC_PAIR_CONFIRM_RPM": "10",
         }
     )
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
@@ -48,7 +50,12 @@ image = (
 
 data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
 
-# Mock keys only. Mounted on llm_worker — not on the public ASGI Function (A4 / leak 1).
+# Leak 4: install token as gateway-only Secret (not written to the Volume file).
+install_secret = modal.Secret.from_dict(
+    {"GLC_INSTALL_TOKEN": "mock-install-token-not-real"}
+)
+
+# A4 / L1: provider keys only for the allowlisted worker Sandbox.
 llm_secret = modal.Secret.from_dict(
     {
         "GEMINI_API_KEY": "mock-not-real",
@@ -60,30 +67,52 @@ llm_secret = modal.Secret.from_dict(
     }
 )
 
+# A3 / leak 6: only these domains may be reached from the provider Sandbox.
+_PROVIDER_EGRESS = [
+    "generativelanguage.googleapis.com",
+    "api.groq.com",
+    "integrate.api.nvidia.com",
+    "api.cerebras.ai",
+    "openrouter.ai",
+    "models.github.ai",
+]
 
-@app.function(image=image, secrets=[llm_secret], timeout=120)
+
+@app.function(image=image, secrets=[llm_secret], timeout=180)
 def llm_worker(payload: dict) -> dict:
-    """Private worker that holds provider keys (A4). Not an HTTP endpoint.
-
-    Future Move: run untrusted adapter work in Sandboxes with
-    outbound_domain_allowlist (A3 / leak 6).
-    """
-    import os
-
-    # Prove keys are here and not on the public Function.
-    return {
-        "ok": True,
-        "has_gemini": bool(os.environ.get("GEMINI_API_KEY")),
-        "echo": payload.get("echo"),
-    }
+    """Run provider-side work inside a Sandbox with an egress allowlist."""
+    code = (
+        "import os, json\n"
+        "print(json.dumps({"
+        "'ok': True, "
+        "'has_gemini': bool(os.environ.get('GEMINI_API_KEY')), "
+        "'echo': os.environ.get('GLC_ECHO', '')"
+        "}))\n"
+    )
+    sb = modal.Sandbox.create(
+        "python",
+        "-c",
+        code,
+        image=image,
+        secrets=[llm_secret],
+        env={"GLC_ECHO": str(payload.get("echo", ""))},
+        outbound_domain_allowlist=_PROVIDER_EGRESS,
+        timeout=120,
+    )
+    try:
+        sb.wait()
+        out = (sb.stdout.read() or "").strip()
+        return {"ok": True, "sandbox_stdout": out, "returncode": sb.returncode}
+    finally:
+        sb.terminate()
 
 
 @app.function(
     image=image,
     volumes={"/data": data_volume},
-    # A4 / leak 1: no provider Secret on the internet-facing process
+    secrets=[install_secret],  # no provider keys on the public ASGI Function
     min_containers=0,
-    max_containers=1,  # A6: single writer for SQLite audit/gateway DBs
+    max_containers=1,  # A6: single SQLite writer
 )
 @modal.asgi_app()
 def fastapi_app():

@@ -33,6 +33,7 @@ from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
 from glc.security.dataplane_auth import DataPlaneAuthMiddleware  # noqa: E402
 from glc.security.dataplane_limits import DataPlaneRateLimitMiddleware  # noqa: E402
+from glc.security.process_guard import install_process_guard  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
 
@@ -60,6 +61,7 @@ def _install_sighup_reload() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    install_process_guard()  # leak 8: block os.kill(getpid) from in-process code
     db.init()
     init_audit()
     get_or_create_install_token()

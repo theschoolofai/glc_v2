@@ -7,26 +7,29 @@ The kill endpoint binds 127.0.0.1 only; the host check is enforced here.
 
 from __future__ import annotations
 
+import hmac
 import os
-import signal
 import time
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from glc.config import get_or_create_install_token
+from glc.security.pair_rate_limit import check_pair_confirm
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
+from glc.security.process_guard import terminate_self
 
 router = APIRouter()
 
 
-def _require_token(authorization: str | None) -> None:
+def _require_token(authorization: str | None) -> str:
     expected = get_or_create_install_token()
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
     presented = authorization.removeprefix("Bearer ").strip()
-    if presented != expected:
+    if not presented or not hmac.compare_digest(presented, expected):
         raise HTTPException(403, "install token mismatch")
+    return presented
 
 
 class PairRequest(BaseModel):
@@ -48,7 +51,10 @@ class PairConfirmRequest(BaseModel):
 
 @router.post("/v1/control/pair", response_model=PairResponse)
 async def pair(req: PairRequest, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    tok = _require_token(authorization)
+    ok, why = check_pair_confirm(f"issue:{tok[:16]}")
+    if not ok:
+        raise HTTPException(429, why)
     if req.trust_level not in ("user_paired", "owner_paired"):
         raise HTTPException(400, f"trust_level must be user_paired or owner_paired, got {req.trust_level!r}")
     code, expires_at = get_pairing_store().issue_code(
@@ -62,7 +68,11 @@ async def pair(req: PairRequest, authorization: str | None = Header(default=None
 
 @router.post("/v1/control/pair/confirm")
 async def pair_confirm(req: PairConfirmRequest, authorization: str | None = Header(default=None)):
-    _require_token(authorization)
+    tok = _require_token(authorization)
+    # C6: bound confirm attempts so 6-digit codes cannot be sprayed.
+    ok, why = check_pair_confirm(f"confirm:{tok[:16]}")
+    if not ok:
+        raise HTTPException(429, why)
     rec = get_pairing_store().confirm_code(req.code)
     if rec is None:
         raise HTTPException(404, "code unknown or expired")
@@ -111,7 +121,7 @@ async def kill(request: Request, authorization: str | None = Header(default=None
 
     async def _shoot() -> None:
         await asyncio.sleep(0.2)
-        os.kill(os.getpid(), signal.SIGTERM)
+        terminate_self()
 
     asyncio.create_task(_shoot())
     return {"status": "terminating", "pid": os.getpid()}

@@ -41,12 +41,29 @@ def install_token_path() -> Path:
     return CONFIG_DIR / "install_token"
 
 
+_cached_install_token: str | None = None
+
+
 def get_or_create_install_token() -> str:
-    """Per-installation token used to authenticate WS adapter connections
-    and /v1/control/* requests. Generated once and persisted to disk."""
+    """Per-installation token for WS adapters and /v1/control/*.
+
+    Leak 4: prefer GLC_INSTALL_TOKEN from the environment (Modal Secret on
+    the gateway only) and keep a process-local cache so callers do not need
+    to re-read the file. When the env var is set, nothing is written to disk.
+    """
+    global _cached_install_token
+    if _cached_install_token:
+        return _cached_install_token
+
+    env = (os.getenv("GLC_INSTALL_TOKEN") or "").strip()
+    if env:
+        _cached_install_token = env
+        return _cached_install_token
+
     p = install_token_path()
     if p.exists():
-        return p.read_text().strip()
+        _cached_install_token = p.read_text().strip()
+        return _cached_install_token
     import secrets
 
     tok = secrets.token_urlsafe(32)
@@ -55,4 +72,5 @@ def get_or_create_install_token() -> str:
         os.chmod(p, 0o600)
     except OSError:
         pass
+    _cached_install_token = tok
     return tok
