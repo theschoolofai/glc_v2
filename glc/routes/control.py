@@ -1,12 +1,14 @@
 """Out-of-band control plane: /v1/control/kill, /v1/control/pair,
 /v1/control/pair/confirm, /v1/control/presence.
 
-All endpoints require the installation token (Authorization: Bearer ...).
+All endpoints require the operator *control* token (Authorization: Bearer ...),
+which is distinct from the install token handed to channel adapters.
 The kill endpoint binds 127.0.0.1 only; the host check is enforced here.
 """
 
 from __future__ import annotations
 
+import hmac
 import os
 import signal
 import time
@@ -14,19 +16,20 @@ import time
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from glc.config import get_or_create_install_token
+from glc.config import get_or_create_control_token
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
 
 router = APIRouter()
 
 
 def _require_token(authorization: str | None) -> None:
-    expected = get_or_create_install_token()
+    """Control plane uses the operator control token, not the install token."""
+    expected = get_or_create_control_token()
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
+        raise HTTPException(401, "missing bearer token (Authorization: Bearer <control_token>)")
     presented = authorization.removeprefix("Bearer ").strip()
-    if presented != expected:
-        raise HTTPException(403, "install token mismatch")
+    if not hmac.compare_digest(presented, expected):
+        raise HTTPException(403, "control token mismatch")
 
 
 class PairRequest(BaseModel):
