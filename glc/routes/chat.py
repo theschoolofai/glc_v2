@@ -72,6 +72,14 @@ ROUTER_PROMPT = (
 router = APIRouter()
 
 
+def _client_error(exc: BaseException, *, provider: str | None = None) -> HTTPException:
+    """C4: never return raw upstream bodies / hostnames to clients."""
+    print(f"[glc] upstream error provider={provider!r}: {exc!r}")
+    if provider:
+        return HTTPException(502, f"{provider} request failed")
+    return HTTPException(502, "upstream request failed")
+
+
 # ─────────────────────────── helpers (verbatim port) ──────────────────────────
 
 
@@ -290,20 +298,24 @@ async def _resolve_image_urls(messages):
 
     import httpx as _httpx
 
+    from glc.security.ssrf import fetch_public_url
+
     async def _fetch_to_data_url(url: str) -> str:
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        try:
+            r = await fetch_public_url(url, timeout=30, headers=headers)
+        except ValueError as e:
+            raise HTTPException(400, f"blocked image url: {e}") from e
+        except _httpx.HTTPError as e:
+            raise HTTPException(400, "failed to fetch image url") from e
+        mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+        if not mt.startswith("image/"):
+            raise HTTPException(400, "url did not return an image")
+        b64 = base64.b64encode(r.content).decode()
+        return f"data:{mt};base64,{b64}"
 
     out = []
     for m in messages:
@@ -605,7 +617,7 @@ async def chat(req: ChatRequest, request: Request):
                 tag += f" → backoff {secs:.0f}s ({reason})"
             all_attempts.append({"provider": name, "reason": tag})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise _client_error(e, provider=name)
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
@@ -628,13 +640,14 @@ async def chat(req: ChatRequest, request: Request):
                 session=req.session,
                 retries=retries,
             )
-            all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
+            all_attempts.append({"provider": name, "reason": "exception"})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise _client_error(e, provider=name)
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    print(f"[glc] all providers unavailable attempts={all_attempts!r} last_error={last_err!r}")
+    raise HTTPException(503, "all providers unavailable")
 
 
 @router.post("/v1/chat/batch")
