@@ -125,9 +125,15 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
-    if mode == "subscribe" and hmac.compare_digest(token, expected):
-        return PlainTextResponse(challenge)
-    raise HTTPException(status_code=403)
+    # An unset/empty expected token must never be treated as a valid
+    # comparison target — otherwise an attacker-supplied empty
+    # hub.verify_token trivially matches via hmac.compare_digest("", ""),
+    # completing the subscription handshake for any channel nobody
+    # configured (invariant 2: a misconfiguration must fail closed, not
+    # be silently treated as an implicit shared secret).
+    if not expected or mode != "subscribe" or not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=403)
+    return PlainTextResponse(challenge)
 
 
 @router.post("/v1/channels/{name}/webhook")
