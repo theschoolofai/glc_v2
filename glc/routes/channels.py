@@ -34,12 +34,14 @@ router = APIRouter()
 
 @router.websocket("/v1/channels/{name}")
 async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+    # C3: header-only auth — query ?token= is rejected (lands in access logs).
+    if token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
-        presented = token
     expected = get_or_create_install_token()
     if presented != expected:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -65,6 +67,21 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # C2 / leak 9: envelope channel must match the WebSocket path.
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="channel_spoof_reject",
+                    result={"claimed": env.channel, "path": name},
+                )
+                await websocket.send_text(
+                    json.dumps({"error": "channel mismatch: envelope.channel must match path"})
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
 
             ok, why = allowed(
                 env.channel,
