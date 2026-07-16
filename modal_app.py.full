@@ -1,0 +1,157 @@
+# modal_app.py - Hardened for glc_v2
+from pathlib import Path
+import modal
+import os
+
+# The Modal "app" is just a namespace for everything we deploy under this name.
+app = modal.App("glc-v2-hardened")
+
+# Path to the glc package next to this file.
+LOCAL_GLC = Path(__file__).parent / "glc"
+
+# The image = a Linux box with Python 3.11, all dependencies, and the glc package.
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+        # Core web framework
+        "fastapi>=0.110",
+        "uvicorn[standard]>=0.27",
+        "httpx>=0.27",
+        "python-dotenv>=1.0",
+        "pydantic>=2.6",
+        "jsonschema>=4.21",
+        "pyyaml>=6.0",
+        "websockets>=12.0",
+        "twilio>=9.0",
+        # Additional dependencies for glc
+        "sqlalchemy>=2.0",
+        "redis>=5.0",
+        "numpy>=1.24",
+        "pandas>=2.0",
+        "scikit-learn>=1.3",
+        "langchain>=0.1",
+        "langchain-core>=0.1",
+        "langchain-community>=0.1",
+        "langgraph>=0.1",
+        "langsmith>=0.1",
+        "openai>=1.0",
+        "anthropic>=0.1",
+        "tiktoken>=0.5",
+        "requests>=2.31",
+        "tenacity>=8.2",
+        "typing-extensions>=4.8",
+        "pydantic-settings>=2.0",
+        "psycopg2-binary>=2.9",
+        "alembic>=1.12",
+        "python-multipart>=0.0.6",
+    )
+    .env({"GLC_CONFIG_DIR": "/data/glc"})
+    .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
+)
+
+# Persistent Volume for databases
+data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
+
+# Mock keys only (never use real ones!)
+# Create this secret with: modal secret create glc-mock-keys --env OPENAI_KEY=sk-mock-123456
+mock_secret = modal.Secret.from_name("glc-mock-keys")
+
+
+@app.function(
+    image=image,
+    volumes={"/data": data_volume},
+    secrets=[mock_secret],
+    min_containers=0,  # scale to zero when idle
+    timeout=600,
+    memory=2048,
+    cpu=2.0,
+)
+@modal.asgi_app()
+def web():
+    """Serve the glc_v2 FastAPI app with error handling."""
+    import sys
+    sys.path.insert(0, "/root")
+    
+    # Ensure data directory exists
+    os.makedirs("/data/glc", exist_ok=True)
+    
+    try:
+        from glc.main import app as glc_app
+        print("✅ glc.main imported successfully!")
+        return glc_app
+    except FileNotFoundError as e:
+        print(f"⚠️ File not found: {e}")
+        # Try to continue anyway
+        from glc.main import app as glc_app
+        return glc_app
+    except Exception as e:
+        print(f"❌ Error loading glc.main: {e}")
+        raise
+
+
+@app.function(
+    image=image,
+    volumes={"/data": data_volume},
+    secrets=[mock_secret],
+)
+def test_import():
+    """Test if the glc.main imports correctly."""
+    import sys
+    sys.path.insert(0, "/root")
+    try:
+        from glc.main import app
+        return {
+            "status": "success",
+            "message": "✅ Import successful!",
+            "app_type": str(type(app))
+        }
+    except ImportError as e:
+        return {
+            "status": "error",
+            "message": f"❌ Import failed: {e}"
+        }
+
+
+@app.function(
+    image=image,
+    secrets=[mock_secret],
+    schedule=modal.Cron("*/5 * * * *")  # every 5 minutes
+)
+def keep_warm():
+    """Keep the app warm to prevent cold starts."""
+    import httpx
+    try:
+        # Replace with your actual URL after deployment
+        response = httpx.get("https://your-username--glc-v2-hardened-web.modal.run/healthz", timeout=10)
+        return f"✅ Warm ping successful: {response.status_code}"
+    except Exception as e:
+        return f"❌ Warm ping failed: {e}"
+
+
+@app.function(
+    image=image,
+    volumes={"/data": data_volume},
+)
+def debug_files():
+    """Debug function to check files in the container."""
+    import os
+    result = {
+        "glc_exists": os.path.exists("/root/glc"),
+        "main_exists": os.path.exists("/root/glc/main.py"),
+        "data_exists": os.path.exists("/data/glc"),
+        "files_in_glc": os.listdir("/root/glc") if os.path.exists("/root/glc") else [],
+        "files_in_data": os.listdir("/data/glc") if os.path.exists("/data/glc") else [],
+    }
+    return result
+
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("🚀 GLC v2 Hardened - Modal Deployment")
+    print("=" * 50)
+    print("\n📋 Commands:")
+    print("  • Test import: modal run modal_app.py::test_import")
+    print("  • Debug files: modal run modal_app.py::debug_files")
+    print("  • Deploy:      modal deploy modal_app.py")
+    print("  • Check logs:  modal app logs glc-v2-hardened")
+    print("=" * 50)
