@@ -13,6 +13,9 @@ def require_install_token(authorization: str | None = Header(default=None)) -> N
     expected = get_or_create_install_token()
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
+    import hmac
+
     presented = authorization.removeprefix("Bearer ").strip()
-    if presented != expected:
+    if not hmac.compare_digest(presented.encode("ascii", "ignore"), expected.encode("ascii", "ignore")):
         raise HTTPException(403, "install token mismatch")
+

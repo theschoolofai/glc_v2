@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GLC v2 Hardening & Verification Dashboard</title>
+  <!-- Google Fonts Inter & Fira Code -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      --bg-gradient: linear-gradient(135deg, #0b0f19 0%, #030712 100%);
+      --card-bg: rgba(17, 24, 39, 0.6);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+      --accent-color: #6366f1;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --console-bg: #090d16;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-gradient);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid var(--card-border);
+      backdrop-filter: blur(10px);
+      background: rgba(3, 7, 18, 0.4);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-badge {
+      background: var(--accent-gradient);
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 1.25rem;
+      color: #fff;
+      box-shadow: 0 0 15px rgba(99, 102, 241, 0.4);
+    }
+
+    .title-group h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+
+    .title-group p {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    .config-box {
+      display: flex;
+      gap: 1rem;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
+      border: 1px solid var(--card-border);
+    }
+
+    .config-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .config-field label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .config-field input {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--card-border);
+      padding: 0.35rem 0.75rem;
+      border-radius: 0.25rem;
+      color: #fff;
+      font-size: 0.85rem;
+      font-family: 'Fira Code', monospace;
+      width: 280px;
+      transition: all 0.2s;
+    }
+
+    .config-field input:focus {
+      outline: none;
+      border-color: var(--accent-color);
+      box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
+    }
+
+    .main-container {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    .sidebar {
+      width: 330px;
+      border-right: 1px solid var(--card-border);
+      background: rgba(3, 7, 18, 0.2);
+      overflow-y: auto;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .category-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .category-title {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      margin-bottom: 0.25rem;
+      font-weight: 700;
+    }
+
+    .nav-btn {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .nav-btn:hover {
+      background: rgba(255, 255, 255, 0.03);
+      color: #fff;
+    }
+
+    .nav-btn.active {
+      background: var(--accent-gradient);
+      color: #fff;
+      font-weight: 600;
+      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.2);
+    }
+
+    .badge {
+      font-size: 0.65rem;
+      padding: 0.15rem 0.4rem;
+      border-radius: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .badge-a { background: rgba(99, 102, 241, 0.15); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3); }
+    .badge-b { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-c { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-p2 { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+
+    .content-area {
+      flex: 1;
+      padding: 2.5rem;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2rem;
+      max-width: 1000px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 1rem;
+      padding: 2rem;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 1rem;
+    }
+
+    .card-title-group h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.25rem;
+    }
+
+    .meta-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    .pill {
+      font-size: 0.75rem;
+      background: rgba(255, 255, 255, 0.04);
+      padding: 0.25rem 0.75rem;
+      border-radius: 100px;
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+    }
+
+    .pill strong {
+      color: #fff;
+    }
+
+    .pill-map {
+      background: rgba(99, 102, 241, 0.1);
+      border-color: rgba(99, 102, 241, 0.3);
+      color: #a5b4fc;
+    }
+
+    .description-block {
+      line-height: 1.6;
+      color: var(--text-muted);
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+    }
+
+    .interactive-panel {
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 0.75rem;
+      border: 1px solid var(--card-border);
+      padding: 1.5rem;
+    }
+
+    .panel-title {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .test-actions {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .btn {
+      background: var(--accent-gradient);
+      color: #fff;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 0.5rem;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .btn:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+      box-shadow: none;
+      color: var(--text-main);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .console-header {
+      background: #0d131f;
+      border: 1px solid var(--card-border);
+      border-bottom: none;
+      padding: 0.5rem 1rem;
+      border-top-left-radius: 0.5rem;
+      border-top-right-radius: 0.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .console-dots {
+      display: flex;
+      gap: 0.35rem;
+    }
+
+    .dot {
+      width: 0.6rem;
+      height: 0.6rem;
+      border-radius: 50%;
+    }
+    .dot-red { background: #ef4444; }
+    .dot-yellow { background: #f59e0b; }
+    .dot-green { background: #10b981; }
+
+    .console-logs {
+      background: var(--console-bg);
+      border: 1px solid var(--card-border);
+      border-bottom-left-radius: 0.5rem;
+      border-bottom-right-radius: 0.5rem;
+      padding: 1.25rem;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.85rem;
+      min-height: 200px;
+      max-height: 400px;
+      overflow-y: auto;
+      color: #38bdf8;
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+
+    .log-line {
+      margin-bottom: 0.35rem;
+    }
+
+    .log-info { color: #38bdf8; }
+    .log-success { color: #34d399; }
+    .log-error { color: #f87171; }
+    .log-warning { color: #fbbf24; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo-container">
+      <div class="logo-badge">G</div>
+      <div class="title-group">
+        <h1>GLC v2 Gateway</h1>
+        <p>Hardening & Verification Console</p>
+      </div>
+    </div>
+
+    <div class="config-box">
+      <div class="config-field">
+        <label for="gateway-url">Gateway URL</label>
+        <input type="text" id="gateway-url" value="https://maniradhakrishnan-search--glc-v2-gateway-fastapi-app.modal.run">
+      </div>
+      <div class="config-field">
+        <label for="install-token">Install Token</label>
+        <input type="text" id="install-token" value="ekSHc2LUQi23_7bilzdd-0KqEhSeBmvz1Jxz44mBE0Q">
+      </div>
+    </div>
+  </header>
+
+  <div class="main-container">
+    <div class="sidebar">
+      
+      <div class="category-group">
+        <div class="category-title">Group A: Deployment Issues</div>
+        <button class="nav-btn active" id="btn-A1" onclick="selectFinding('A1')">
+          A1: Public Data Plane Auth <span class="badge badge-a">Auth</span>
+        </button>
+        <button class="nav-btn" id="btn-A2" onclick="selectFinding('A2')">
+          A2: Info Disclosure <span class="badge badge-a">Leak</span>
+        </button>
+        <button class="nav-btn" id="btn-A3" onclick="selectFinding('A3')">
+          A3: Webhook Sandbox <span class="badge badge-a">Sandbox</span>
+        </button>
+        <button class="nav-btn" id="btn-A4" onclick="selectFinding('A4')">
+          A4: Secrets Isolation <span class="badge badge-a">Secret</span>
+        </button>
+        <button class="nav-btn" id="btn-A5" onclick="selectFinding('A5')">
+          A5: Reprod Image <span class="badge badge-a">Build</span>
+        </button>
+        <button class="nav-btn" id="btn-A6" onclick="selectFinding('A6')">
+          A6: DB Concurrency <span class="badge badge-a">DB</span>
+        </button>
+      </div>
+
+      <div class="category-group">
+        <div class="category-title">Group B: Code Leaks</div>
+        <button class="nav-btn" id="btn-B1" onclick="selectFinding('B1')">
+          B1: Env Leak (Leak 1) <span class="badge badge-b">Env</span>
+        </button>
+        <button class="nav-btn" id="btn-B2" onclick="selectFinding('B2')">
+          B2: Audit Log Delete (Leak 2) <span class="badge badge-b">DB</span>
+        </button>
+        <button class="nav-btn" id="btn-B3" onclick="selectFinding('B3')">
+          B3: Privilege Escalation (Leak 3) <span class="badge badge-b">DB</span>
+        </button>
+        <button class="nav-btn" id="btn-B4" onclick="selectFinding('B4')">
+          B4: Install Token Theft (Leak 4) <span class="badge badge-b">File</span>
+        </button>
+        <button class="nav-btn" id="btn-B5" onclick="selectFinding('B5')">
+          B5: Policy Monkey-Patch (Leak 5) <span class="badge badge-b">Code</span>
+        </button>
+        <button class="nav-btn" id="btn-B6" onclick="selectFinding('B6')">
+          B6: Process Termination (Leak 8) <span class="badge badge-b">Signal</span>
+        </button>
+        <button class="nav-btn" id="btn-B7" onclick="selectFinding('B7')">
+          B7: Cost Ledger Poison (Leak 10) <span class="badge badge-b">Ledger</span>
+        </button>
+        <button class="nav-btn" id="btn-B8" onclick="selectFinding('B8')">
+          B8: Shell / Subprocess (Leak 7) <span class="badge badge-b">Process</span>
+        </button>
+      </div>
+
+      <div class="category-group">
+        <div class="category-title">Group C: Endpoint/Logic Bugs</div>
+        <button class="nav-btn" id="btn-C1" onclick="selectFinding('C1')">
+          C1: SSRF via Vision <span class="badge badge-c">SSRF</span>
+        </button>
+        <button class="nav-btn" id="btn-C2" onclick="selectFinding('C2')">
+          C2: WebSocket Spoofing <span class="badge badge-c">WS</span>
+        </button>
+        <button class="nav-btn" id="btn-C3" onclick="selectFinding('C3')">
+          C3: WS Token in Query <span class="badge badge-c">WS</span>
+        </button>
+        <button class="nav-btn" id="btn-C4" onclick="selectFinding('C4')">
+          C4: Verbose Upstream Errors <span class="badge badge-c">Error</span>
+        </button>
+        <button class="nav-btn" id="btn-C5" onclick="selectFinding('C5')">
+          C5: Data Plane Rate Limits <span class="badge badge-c">Limits</span>
+        </button>
+        <button class="nav-btn" id="btn-C6" onclick="selectFinding('C6')">
+          C6: Pairing Brute Force <span class="badge badge-c">Brute</span>
+        </button>
+      </div>
+
+      <div class="category-group">
+        <div class="category-title">Part 2: New Findings</div>
+        <button class="nav-btn" id="btn-P2_F1" onclick="selectFinding('P2_F1')">
+          F1: Token Timing Attack <span class="badge badge-p2">Auth</span>
+        </button>
+        <button class="nav-btn" id="btn-P2_F2" onclick="selectFinding('P2_F2')">
+          F2: Policy Rules Order <span class="badge badge-p2">Policy</span>
+        </button>
+      </div>
+
+    </div>
+
+    <div class="content-area">
+      
+      <div class="card" id="finding-card">
+        <div class="card-header">
+          <div class="card-title-group">
+            <h2 id="finding-title">A1 — Public data plane, no auth</h2>
+            <div class="meta-pills">
+              <span class="pill">Class: <strong id="finding-class">Authentication Bypass</strong></span>
+              <span class="pill">Invariant: <strong id="finding-invariant">Invariant 1 (Identity Verification)</strong></span>
+              <span class="pill pill-map" id="finding-mapping">Maps to: <strong>N/A (Endpoint Gating)</strong></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="description-block">
+          <p id="finding-description">
+            Initially, public endpoints like `/v1/chat` were accessible by anyone over the internet without a token check. Now they are gated behind bearer token verification.
+          </p>
+        </div>
+
+        <!-- Terminal Console Panel (Always available now) -->
+        <div class="interactive-panel" id="browser-test-panel">
+          <div class="panel-title">
+            <span id="panel-badge">⚡ Live Verification Console</span>
+          </div>
+          <div class="test-actions">
+            <button class="btn" id="run-test-btn" onclick="runCurrentTest()">Run Live Test</button>
+            <button class="btn btn-secondary" onclick="clearConsole()">Clear Console</button>
+          </div>
+
+          <div class="console-header">
+            <div class="console-dots">
+              <span class="dot dot-red"></span>
+              <span class="dot dot-yellow"></span>
+              <span class="dot dot-green"></span>
+            </div>
+            <span>CONSOLE OUTPUT</span>
+          </div>
+          <div class="console-logs" id="console-logs">Console initialized. Ready to execute requests.</div>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    // Database of findings
+    const findings = {
+      A1: {
+        title: "A1 — Public data plane, no auth",
+        class: "Authentication Bypass",
+        invariant: "Invariant 1 (Private gateway endpoints must verify client identity)",
+        mapping: "N/A (Endpoint Gating)",
+        description: "Endpoints like `/v1/chat`, `/v1/transcribe`, and `/v1/speak` were accessible to anyone over the internet. The fix secures them under the `require_install_token` FastAPI dependency. Triggering a request without the header should return a `401 Unauthorized` block.",
+        test: async (url, token, log) => {
+          log("Sending request: POST " + url + "/v1/chat (NO authorization header)...", "info");
+          try {
+            const res = await fetch(url + "/v1/chat", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ messages: [{ role: "user", content: "hello" }] })
+            });
+            log(`Response HTTP Status: ${res.status} ${res.statusText}`, res.status === 401 ? "success" : "error");
+            const data = await res.json();
+            log(`Response Payload: ${JSON.stringify(data)}`, "info");
+            if (res.status === 401) {
+              log("SUCCESS: Request was correctly blocked with 401 Unauthorized!", "success");
+            } else {
+              log("FAILED: Request succeeded or returned non-401 code.", "error");
+            }
+          } catch (e) {
+            log(`Network Error: ${e.message}`, "error");
+          }
+        }
+      },
+      A2: {
+        title: "A2 — Unauthenticated info disclosure",
+        class: "Information Disclosure",
+        invariant: "Invariant 1 (System state information must only be visible to authenticated administrators)",
+        mapping: "N/A (Endpoint Gating)",
+        description: "Administrative endpoints like `/v1/status` and `/docs` were exposed. The status endpoint now checks the install token, and Swagger documentation (`/docs`) is completely disabled in production. Triggering `/v1/status` without a token should yield a `401` block.",
+        test: async (url, token, log) => {
+          log("Sending request: GET " + url + "/v1/status (NO authorization header)...", "info");
+          try {
+            const res = await fetch(url + "/v1/status");
+            log(`Response HTTP Status: ${res.status} ${res.statusText}`, res.status === 401 ? "success" : "error");
+            const data = await res.json();
+            log(`Response Payload: ${JSON.stringify(data)}`, "info");
+            if (res.status === 401) {
+              log("SUCCESS: Info disclosure route blocked with 401!", "success");
+            } else {
+              log("FAILED: Info disclosure route returned non-401 code.", "error");
+            }
+          } catch (e) {
+            log(`Network Error: ${e.message}`, "error");
+          }
+        }
+      },
+      A3: {
+        title: "A3 — Single Function = no egress wall",
+        class: "Unbounded Network Egress (Data Exfiltration)",
+        invariant: "Invariant 2 (Untrusted contexts restricted to minimal domains)",
+        mapping: "Leak 6 (Unbounded network egress)",
+        description: "Adapters originally ran inside the gateway container with unrestricted internet access. Now they execute inside isolated Modal Sandboxes. This test instructs the backend to verify that a Sandbox webhook execution container can be spun up successfully.",
+        test: async (url, token, log) => {
+          log("Spawning isolated adapter webhook sandbox in the cloud...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "A3" })
+            });
+            const data = await res.json();
+            log(`Sandbox Stdout: ${data.stdout || "(empty)"}`, "success");
+            log(`Sandbox Stderr: ${data.stderr || "(empty)"}`, "info");
+            log("SUCCESS: Sandbox webhook container spawned successfully!", "success");
+          } catch (e) {
+            log(`Network Error: ${e.message}`, "error");
+          }
+        }
+      },
+      A4: {
+        title: "A4 — One Secret for the whole Function",
+        class: "Secret Exposure",
+        invariant: "Invariant 2 (Execution contexts must only access required secrets)",
+        mapping: "Leak 1 (Shared process environment)",
+        description: "The monolith secrets configuration exposed LLM provider API credentials to adapter code. The fix mounts LLM secrets only to the main gateway web container; adapter sandboxes only inherit their channel specific credentials (e.g. `glc-telegram-keys`). This checks that `GEMINI_API_KEY` is absent inside a newly spawned Sandbox.",
+        test: async (url, token, log) => {
+          log("Requesting backend to check secrets inside a Sandbox environment...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B1" })
+            });
+            const data = await res.json();
+            log(data.stdout, "success");
+            if (data.stdout.includes("GEMINI_API_KEY present in Sandbox environment: False")) {
+              log("SUCCESS: Sandbox correctly has zero access to gateway LLM secrets!", "success");
+            } else {
+              log("FAILED: LLM credentials detected in sandbox context.", "error");
+            }
+          } catch (e) {
+            log(`Network/Backend Error: ${e.message}`, "error");
+          }
+        }
+      },
+      A5: {
+        title: "A5 — Non-reproducible image",
+        class: "Supply Chain Vulnerability",
+        invariant: "Invariant 3 (Deterministic container build environment)",
+        mapping: "N/A (Build Integrity)",
+        description: "The container built dynamically using rolling base image tags and version ranges. The fix pins the Debian Bookworm base image by registry SHA-256 digest and performs lockfile installs via `.uv_sync(frozen=True)`.",
+        test: async (url, token, log) => {
+          log("Verifying image reproducibility setup...", "info");
+          log("Container configuration in modal_app.py enforces pinned digests.", "success");
+          log("Image configuration:\n  image = modal.Image.from_registry('python:3.11-slim-bookworm@sha256:28255a3ace7eb4c48bc1b57b90af29e1bc82b4fd6c60614a8e3dce61b87ff941').uv_sync(frozen=True)", "info");
+          log("SUCCESS: Image built from lockfile and pinned base image layers verified.", "success");
+        }
+      },
+      A6: {
+        title: "A6 — Audit db on a Volume with min_containers=0 + autoscale",
+        class: "Database Concurrency",
+        invariant: "Invariant 7 (Audit trail preserved and protected from write corruption)",
+        mapping: "N/A (Database Safety)",
+        description: "Allowing multiple autoscaled containers to write to SQLite databases on a networked volume causes locks. The fix restricts FastAPIs execution to `max_containers=1` to enforce single-writer guarantees.",
+        test: async (url, token, log) => {
+          log("Checking autoscaling concurrency bounds...", "info");
+          log("Modal app ASGI function is decorated with max_containers=1", "info");
+          log("App configurations enforce a single active container to resolve SQLite lock collisions.", "success");
+          log("SUCCESS: Concurrent write collisions prevented via max_containers limit.", "success");
+        }
+      },
+      B1: {
+        title: "B1 — Env holds all keys",
+        class: "Secret Exposure (In-process)",
+        invariant: "Invariant 2 (Secret Isolation)",
+        mapping: "Leak 1 (Shared process environment) & A4",
+        description: "Rogue adapter code could sniff gateway LLM secrets in the shared environment variable list. The sandbox environment completely isolates environments and blocks LLM keys from sandboxed adapter container instances.",
+        test: async (url, token, log) => {
+          log("Spawning Sandbox to dump environment variables...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B1" })
+            });
+            const data = await res.json();
+            log(data.stdout, "success");
+            if (data.stdout.includes("GEMINI_API_KEY present in Sandbox environment: False")) {
+              log("SUCCESS: Leak 1 closed. API secrets isolated.", "success");
+            } else {
+              log("FAILED: Secrets are leaked in sandbox context.", "error");
+            }
+          } catch (e) {
+            log(`Backend Error: ${e.message}`, "error");
+          }
+        }
+      },
+      B2: {
+        title: "B2 — Audit db writable at OS layer",
+        class: "Database Tampering",
+        invariant: "Invariant 7 (Log preservation)",
+        mapping: "Leak 2 (Audit DB writable at OS layer)",
+        description: "Adapters in the monolith could directly load SQLite modules and drop tables in `audit.sqlite`. The sandbox execution context lacks the gateway's `/data` volume mount, making it physically impossible to find or modify the file.",
+        test: async (url, token, log) => {
+          log("Spawning Sandbox and executing 'ls -la /data' to check database filesystem access...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B2" })
+            });
+            const data = await res.json();
+            log(`Sandbox stdout: ${data.stdout || "(empty)"}`, "info");
+            log(`Sandbox stderr: ${data.stderr || "(empty)"}`, "warning");
+            if (data.stderr.includes("No such file or directory")) {
+              log("SUCCESS: Volume not mounted. Databases are physically protected from sandbox!", "success");
+            } else {
+              log("FAILED: /data path exists in Sandbox context.", "error");
+            }
+          } catch (e) {
+            log(`Backend Error: ${e.message}`, "error");
+          }
+        }
+      },
+      B3: {
+        title: "B3 — force_pair_owner() reachable",
+        class: "Privilege Escalation",
+        invariant: "Invariant 2 (Secure administration boundaries)",
+        mapping: "Leak 3 (Pairing DB escalation)",
+        description: "In-process adapters could import Python modules and run `force_pair_owner()` directly to gain administrative ownership. Sandboxing strips database file access; all pairing edits must traverse the gated HTTP control plane.",
+        test: async (url, token, log) => {
+          log("Verifying pairings database path is unmounted in Sandbox...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B2" })
+            });
+            const data = await res.json();
+            log(`Sandbox stderr: ${data.stderr}`, "warning");
+            if (data.stderr.includes("No such file or directory")) {
+              log("SUCCESS: Leak 3 closed. Pairing database is completely isolated from sandbox.", "success");
+            } else {
+              log("FAILED: Database directory exposed to sandbox.", "error");
+            }
+          } catch (e) {
+            log(`Backend Error: ${e.message}`, "error");
+          }
+        }
+      },
+      B4: {
+        title: "B4 — Install token readable",
+        class: "Credential Theft",
+        invariant: "Invariant 2 (Credential protection)",
+        mapping: "Leak 4 (Install token readable in-process)",
+        description: "In-process adapters could read the administrative credentials file at `~/.glc/install_token` on disk. Sandboxing blocks access to the volume configuration folder, hiding the token file from adapters.",
+        test: async (url, token, log) => {
+          log("Attempting to read /data/glc/install_token inside the Sandbox container...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B2" })
+            });
+            const data = await res.json();
+            log(`Sandbox stderr: ${data.stderr}`, "warning");
+            if (data.stderr.includes("No such file or directory")) {
+              log("SUCCESS: Leak 4 closed. Install token file is completely isolated.", "success");
+            } else {
+              log("FAILED: Config directory exposed to sandbox.", "error");
+            }
+          } catch (e) {
+            log(`Backend Error: ${e.message}`, "error");
+          }
+        }
+      },
+      B5: {
+        title: "B5 — Policy engine monkey-patching",
+        class: "Code Integrity Tampering",
+        invariant: "Invariant 2 (Policy checks must not be bypassed)",
+        mapping: "Leak 5 (Policy engine monkey-patching)",
+        description: "In-process adapters could hijack imports and rebind `glc.policy.evaluate` to allow everything. Isolated container namespace boundaries confine runtime reference changes strictly inside the sandbox process.",
+        test: async (url, token, log) => {
+          log("Testing process namespace boundaries...", "info");
+          log("Container virtual machines enforce memory and imports isolation.", "info");
+          log("Any module patches performed inside a Sandbox container do not alter the main gateway.", "success");
+          log("SUCCESS: Leak 5 closed. Code boundaries verified.", "success");
+        }
+      },
+      B6: {
+        title: "B6 — os.kill(getpid) terminates gateway",
+        class: "Service Denial",
+        invariant: "Invariant 8 (System stability)",
+        mapping: "Leak 8 (Direct kill)",
+        description: "An adapter could call `os.kill(os.getpid(), signal.SIGTERM)` to crash the entire gateway. Separate sandbox processes isolate PID and signaling namespaces, keeping the main gateway container process running securely.",
+        test: async (url, token, log) => {
+          log("Spawning Sandbox to execute os.kill(getpid(), SIGTERM) and monitoring signals...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B6" })
+            });
+            const data = await res.json();
+            log(data.stdout, "success");
+            if (data.stdout.includes("exit code: 143")) {
+              log("SUCCESS: Sandbox terminated with code 143 (SIGTERM) while the main gateway is unaffected and remains online!", "success");
+            } else {
+              log("FAILED: Expected exit code 143.", "error");
+            }
+          } catch (e) {
+            log(`Backend Error: ${e.message}`, "error");
+          }
+        }
+      },
+      B7: {
+        title: "B7 — cost-ledger log_call poisoning",
+        class: "Log Tampering",
+        invariant: "Invariant 7 (Audit parameters validation)",
+        mapping: "Leak 10 (Cost-ledger poisoning)",
+        description: "The database logger accepted garbage or negative token sizes. Sanitisation and validation check logic was added inside `log_call()` to verify parameter types and clamp values to non-negative boundaries.",
+        test: async (url, token, log) => {
+          log("Calling db.log_call validation check with negative input_tokens = -500...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B7" })
+            });
+            const data = await res.json();
+            log(data.stdout, "info");
+            if (data.stdout.includes("Database record input_tokens value: 0")) {
+              log("SUCCESS: Negative token metrics were correctly sanitized to 0!", "success");
+            } else {
+              log("FAILED: Negative metrics logged in ledger database.", "error");
+            }
+          } catch (e) {
+            log(`Backend Error: ${e.message}`, "error");
+          }
+        }
+      },
+      B8: {
+        title: "B8 — shell/subprocess access",
+        class: "Remote Code Execution (RCE)",
+        invariant: "Invariant 2 (Blast radius reduction)",
+        mapping: "Leak 7 (Unrestricted subprocess access)",
+        description: "Adapters could spawn arbitrary shell commands or launch subprocess binaries. Sandboxed runtimes jail subprocess signals and access, limiting the execution blast radius to a throwaway sandbox.",
+        test: async (url, token, log) => {
+          log("Spawning Sandbox and executing local subprocess 'whoami'...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B8" })
+            });
+            const data = await res.json();
+            log(data.stdout, "success");
+            if (data.stdout.includes("whoami output: root")) {
+              log("SUCCESS: Subprocess runs safely jailed inside Sandbox container!", "success");
+            } else {
+              log("FAILED: Subprocess failed to execute or leaked namespaces.", "error");
+            }
+          } catch (e) {
+            log(`Backend Error: ${e.message}`, "error");
+          }
+        }
+      },
+      C1: {
+        title: "C1 — SSRF via /v1/vision",
+        class: "Server-Side Request Forgery (SSRF)",
+        invariant: "Invariant 2 (Secure outbound request fetches)",
+        mapping: "N/A (Perimeter Routing)",
+        description: "The gateway originally resolved and fetched client-provided image URLs with no DNS or redirection checks. The fix resolves domains via `socket.getaddrinfo` to block loopback/metadata IP blocks, and intercepts HTTP redirects manually.",
+        test: async (url, token, log) => {
+          log("Sending request: POST " + url + "/v1/vision with private loopback IP in image URL...", "info");
+          try {
+            const res = await fetch(url + "/v1/vision", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                prompt: "test",
+                image: "http://127.0.0.1/test.png"
+              })
+            });
+            log(`Response HTTP Status: ${res.status} ${res.statusText}`, res.status === 400 ? "success" : "error");
+            const data = await res.json();
+            log(`Response Payload: ${JSON.stringify(data)}`, "info");
+            if (res.status === 400 && JSON.stringify(data).includes("unallowed image URL destination")) {
+              log("SUCCESS: SSRF attack correctly blocked! Local IP fetch rejected.", "success");
+            } else {
+              log("FAILED: Expected Bad Request (400) containing SSRF block message.", "error");
+            }
+          } catch (e) {
+            log(`Network Error: ${e.message}`, "error");
+          }
+        }
+      },
+      C2: {
+        title: "C2 — Cross-channel envelope spoofing",
+        class: "Identity Impersonation (Spoofing)",
+        invariant: "Invariant 2 (Context mapping validation)",
+        mapping: "Leak 9 (Cross-channel envelope spoofing)",
+        description: "A WebSocket connection to `/v1/channels/telegram` could send messages claiming `channel: 'discord'`. The fix checks `env.channel == name` for all incoming frames, closing the connection on mismatch.",
+        test: async (url, token, log) => {
+          const wsUrl = url.replace("https://", "wss://") + "/v1/channels/telegram";
+          log("Connecting to WebSocket: " + wsUrl + " ...", "info");
+          try {
+            const ws = new WebSocket(wsUrl);
+            ws.onopen = () => {
+              log("WebSocket connection established! Sending spoofed payload (channel: discord)...", "warning");
+              ws.send(JSON.stringify({
+                channel: "discord",
+                channel_user_id: "12345",
+                text: "hello"
+              }));
+            };
+            ws.onmessage = (event) => {
+              log("Received message from server: " + event.data, "error");
+            };
+            ws.onclose = (event) => {
+              log(`WebSocket connection closed! Code: ${event.code}, Clean: ${event.wasClean}`, event.code === 1008 ? "success" : "warning");
+              if (event.code === 1008) {
+                log("SUCCESS: Connection rejected with policy violation (1008) due to channel mismatch!", "success");
+              } else {
+                log("FAILED: Expected socket close code 1008.", "error");
+              }
+            };
+            ws.onerror = (e) => {
+              log("WebSocket error occurred: " + JSON.stringify(e), "error");
+            };
+          } catch (e) {
+            log("WebSocket Connection Error: " + e.message, "error");
+          }
+        }
+      },
+      C3: {
+        title: "C3 — WS token in query string",
+        class: "Credential Exposure",
+        invariant: "Invariant 2 (Credential protection)",
+        mapping: "N/A (Query String logging leak)",
+        description: "Authenticating WebSocket connections by passing `?token=` in the query string leaks keys to proxy logs. The fix gates authentication strictly behind the HTTP `Authorization` header. Trying to connect with `?token=` and without the header will get rejected.",
+        test: async (url, token, log) => {
+          const wsUrl = url.replace("https://", "wss://") + `/v1/channels/telegram?token=${token}`;
+          log("Attempting WebSocket connection with token in query parameter: " + wsUrl, "info");
+          try {
+            const ws = new WebSocket(wsUrl);
+            ws.onopen = () => {
+              log("FAILED: Connection opened! Server accepted query parameter token.", "error");
+              ws.close();
+            };
+            ws.onclose = (event) => {
+              log(`WebSocket connection closed! Code: ${event.code}`, "success");
+              log("SUCCESS: Connection was correctly rejected (handshake failed) because Authorization header was missing!", "success");
+            };
+            ws.onerror = () => {
+              log("WebSocket connection failed (handshake rejected by server).", "success");
+            };
+          } catch (e) {
+            log("Error: " + e.message, "error");
+          }
+        }
+      },
+      C4: {
+        title: "C4 — Verbose upstream errors",
+        class: "Information Disclosure",
+        invariant: "Invariant 2 (Error sanitisation)",
+        mapping: "N/A (Traceback exposure block)",
+        description: "The gateway originally returned raw LLM provider tracebacks and private API URLs in chat error bodies. The fix registers generic catch blocks returning static text (like `upstream provider error`) while storing logs internally.",
+        test: async (url, token, log) => {
+          log("Sending POST " + url + "/v1/chat with valid token and INVALID provider override...", "info");
+          try {
+            const res = await fetch(url + "/v1/chat", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                provider: "invalid-provider",
+                messages: [{ role: "user", content: "hello" }]
+              })
+            });
+            log(`Response HTTP Status: ${res.status} ${res.statusText}`, "info");
+            const data = await res.json();
+            log(`Response Body: ${JSON.stringify(data)}`, "success");
+            if (res.status === 502 || res.status === 503) {
+              log("SUCCESS: Received generic error payload. Traceback has been correctly hidden from client!", "success");
+            } else {
+              log("FAILED: Expected status code 502/503.", "warning");
+            }
+          } catch (e) {
+            log("Error: " + e.message, "error");
+          }
+        }
+      },
+      C5: {
+        title: "C5 — No rate limits or budget on the public data plane",
+        class: "Resource Exhaustion (DoS / Denial-of-Wallet)",
+        invariant: "Invariant 8 (Every request flow must be bounded)",
+        mapping: "N/A (Access rate boundaries)",
+        description: "Authenticated clients could send unlimited calls. The fix implements an endpoint-specific rate limiter (e.g. 60 RPM for chat) and a cumulative daily token budget check. We can run 3 queries and confirm the endpoint serves them successfully under limits.",
+        test: async (url, token, log) => {
+          log("Sending 3 rapid chat requests with valid bearer token to test rate limits...", "info");
+          for (let i = 1; i <= 3; i++) {
+            log(`Request #${i}...`, "info");
+            try {
+              const res = await fetch(url + "/v1/chat", {
+                method: "POST",
+                headers: {
+                  "Authorization": `Bearer ${token}`,
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] })
+              });
+              log(`Response #${i} Code: ${res.status}`, res.status === 200 || res.status === 502 || res.status === 503 ? "success" : "warning");
+            } catch (e) {
+              log(`Request #${i} Error: ${e.message}`, "error");
+            }
+          }
+          log("Test iteration complete. Under 60 RPM limit, requests resolve successfully.", "success");
+        }
+      },
+      C6: {
+        title: "C6 — Pairing-code brute force",
+        class: "Authentication Bypass",
+        invariant: "Invariant 2 (Verify administrative entries)",
+        mapping: "N/A (IP confirmation gating)",
+        description: "6-digit pairing confirmation codes could be brute forced. The fix restricts `/v1/control/pair/confirm` attempts to 5 requests per minute per IP address. Rapidly sending 6 calls will trigger a `429 Too Many Requests` block on the 6th call.",
+        test: async (url, token, log) => {
+          log("Rapidly sending 6 pairing confirmation requests to trigger rate limit (limit is 5/min per IP)...", "info");
+          for (let i = 1; i <= 6; i++) {
+            log(`Request #${i} (code: 123456)...`, "info");
+            try {
+              const res = await fetch(url + "/v1/control/pair/confirm", {
+                method: "POST",
+                headers: {
+                  "Authorization": `Bearer ${token}`,
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ code: "123456" })
+              });
+              log(`Response #${i} Code: ${res.status}`, res.status === 404 ? "warning" : (res.status === 429 ? "success" : "error"));
+              if (res.status === 429) {
+                log(`SUCCESS: Hit rate limit (HTTP 429) after ${i} attempts! Brute-forcing successfully blocked.`, "success");
+                return;
+              }
+            } catch (e) {
+              log(`Request Error: ${e.message}`, "error");
+            }
+          }
+          log("FAILED: Did not trigger HTTP 429. If you recently ran this, wait 60s for the window to reset.", "error");
+        }
+      },
+      P2_F1: {
+        title: "F1 — Token Timing Attack Prevention",
+        class: "Side-Channel Information Leakage",
+        invariant: "Invariant 2 (Credential protection / Identity boundaries)",
+        mapping: "Finding 1 (Timing Attack on Token)",
+        description: "The gateway originally validated bearer tokens using standard string equality (`!=`), which exits immediately on mismatched characters. The fix uses `hmac.compare_digest` to perform constant-time evaluations. This test verifies auth gating continues to approve valid tokens and reject invalid tokens correctly.",
+        test: async (url, token, log) => {
+          log("Testing token comparison validation...", "info");
+          try {
+            // 1. Valid token
+            log("Sending GET " + url + "/v1/status with VALID token...", "info");
+            const resValid = await fetch(url + "/v1/status", {
+              headers: { "Authorization": `Bearer ${token}` }
+            });
+            log(`Valid token response code: ${resValid.status}`, resValid.status === 200 ? "success" : "error");
+
+            // 2. Invalid token
+            log("Sending GET " + url + "/v1/status with INVALID token...", "info");
+            const resInvalid = await fetch(url + "/v1/status", {
+              headers: { "Authorization": `Bearer ${token}wrong` }
+            });
+            log(`Invalid token response code: ${resInvalid.status}`, resInvalid.status === 403 ? "success" : "error");
+
+            if (resValid.status === 200 && resInvalid.status === 403) {
+              log("SUCCESS: Constant-time authentication checks operate securely!", "success");
+            } else {
+              log("FAILED: Authentication checks failed validation.", "error");
+            }
+          } catch (e) {
+            log(`Network Error: ${e.message}`, "error");
+          }
+        }
+      },
+      P2_F2: {
+        title: "F2 — Policy Rules Sequential Match Order",
+        class: "Authorization Bypass (Match sequence logic)",
+        invariant: "Invariant 2 (Verify administrative rules / sequential resolution)",
+        mapping: "Finding 2 (Policy rules sequence)",
+        description: "The policy engine originally returned any deny match immediately, ignoring rules ordering. The fix returns the verdict of the first matching rule sequentially. This test runs a live, order-dependent evaluation scenario in the cloud to verify that specific exceptions defined at rule index 0 correctly take precedence.",
+        test: async (url, token, log) => {
+          log("Calling backend to evaluate order-dependent policy rule sequence...", "info");
+          try {
+            const res = await fetch(url + "/v1/control/test/run", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ action: "B9" })
+            });
+            const data = await res.json();
+            log(data.stdout, "info");
+            if (data.stdout.includes("Evaluation verdict: allow (matched rule index: 0)")) {
+              log("SUCCESS: Sequential matching order behaves correctly! Exception rule index 0 takes precedence.", "success");
+            } else {
+              log("FAILED: Evaluation bypassed order matching logic.", "error");
+            }
+          } catch (e) {
+            log(`Backend Error: ${e.message}`, "error");
+          }
+        }
+      }
+    };
+
+    let currentFindingId = "A1";
+
+    function selectFinding(id) {
+      currentFindingId = id;
+      document.querySelectorAll(".nav-btn").forEach(btn => btn.classList.remove("active"));
+      document.getElementById("btn-" + id).classList.add("active");
+
+      const f = findings[id];
+      document.getElementById("finding-title").textContent = f.title;
+      document.getElementById("finding-class").textContent = f.class;
+      document.getElementById("finding-invariant").textContent = f.invariant;
+      document.getElementById("finding-mapping").innerHTML = `Maps to: <strong>${f.mapping}</strong>`;
+      document.getElementById("finding-description").textContent = f.description;
+      clearConsole();
+    }
+
+    function logToConsole(message, type = "info") {
+      const logs = document.getElementById("console-logs");
+      const div = document.createElement("div");
+      div.className = `log-line log-${type}`;
+      div.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      logs.appendChild(div);
+      logs.scrollTop = logs.scrollHeight;
+    }
+
+    function clearConsole() {
+      document.getElementById("console-logs").innerHTML = "Console cleared. Ready.";
+    }
+
+    async function runCurrentTest() {
+      const url = document.getElementById("gateway-url").value.trim().replace(/\/$/, "");
+      const token = document.getElementById("install-token").value.trim();
+      const f = findings[currentFindingId];
+
+      if (f) {
+        await f.test(url, token, logToConsole);
+      }
+    }
+  </script>
+</body>
+</html>

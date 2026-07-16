@@ -22,11 +22,13 @@ router = APIRouter()
 
 
 def _require_token(authorization: str | None) -> None:
+    import hmac
+
     expected = get_or_create_install_token()
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
     presented = authorization.removeprefix("Bearer ").strip()
-    if presented != expected:
+    if not hmac.compare_digest(presented.encode("ascii", "ignore"), expected.encode("ascii", "ignore")):
         raise HTTPException(403, "install token mismatch")
 
 
@@ -183,6 +185,35 @@ async def test_run(req: TestRunRequest, authorization: str | None = Header(defau
         sb = modal.Sandbox.create("python", "-c", "import subprocess; r = subprocess.run(['whoami'], capture_output=True, text=True); print('whoami output:', r.stdout.strip())", image=image, app=app)
         sb.wait()
         return {"status": "success", "stdout": sb.stdout.read(), "stderr": sb.stderr.read()}
+        
+    elif action == "B9":
+        from glc.policy.schemas import PolicyConfig, PolicyRule
+        from glc.policy.engine import PolicyEngine
+        config = PolicyConfig(
+            rules=[
+                PolicyRule(
+                    tool="email.send",
+                    trust_level="*",
+                    action="allow",
+                    reason="exception allowed for everyone",
+                ),
+                PolicyRule(
+                    tool="email.send",
+                    trust_level="*",
+                    action="deny",
+                    reason="email send is generally blocked",
+                ),
+            ]
+        )
+        engine = PolicyEngine(config)
+        verdict = engine.evaluate(
+            tool_call={"name": "email.send", "arguments": {}},
+            context={"channel": "telegram", "trust_level": "untrusted"},
+        )
+        return {
+            "status": "success",
+            "stdout": f"Policy rules configured:\n  Rule #0: allow exception for email.send\n  Rule #1: deny all email.send\n\nEvaluation verdict: {verdict.action} (matched rule index: {verdict.matched_rule_index})"
+        }
         
     else:
         raise HTTPException(400, f"Unsupported action {action}")

@@ -120,3 +120,48 @@ def test_websocket_channel_spoofing_mismatch_closes_connection(app_client, insta
         with pytest.raises(WebSocketDisconnect) as exc:
             ws.receive_text()
         assert exc.value.code == 1008
+
+
+def test_constant_time_auth_comparison(app_client, install_token):
+    # Confirm valid token succeeds
+    headers = {"Authorization": f"Bearer {install_token}"}
+    r = app_client.get("/v1/status", headers=headers)
+    assert r.status_code == 200
+
+    # Confirm invalid token fails
+    headers = {"Authorization": f"Bearer {install_token}wrong"}
+    r = app_client.get("/v1/status", headers=headers)
+    assert r.status_code == 403
+
+
+def test_policy_evaluation_match_order():
+    from glc.policy.schemas import PolicyConfig, PolicyRule
+    from glc.policy.engine import PolicyEngine
+
+    # Rule list: first allows email.send, second denies it
+    config = PolicyConfig(
+        rules=[
+            PolicyRule(
+                tool="email.send",
+                trust_level="*",
+                action="allow",
+                reason="exception allowed for everyone",
+            ),
+            PolicyRule(
+                tool="email.send",
+                trust_level="*",
+                action="deny",
+                reason="email send is generally blocked",
+            ),
+        ]
+    )
+
+    engine = PolicyEngine(config)
+    verdict = engine.evaluate(
+        tool_call={"name": "email.send", "arguments": {}},
+        context={"channel": "telegram", "trust_level": "untrusted"},
+    )
+    # The first rule (action="allow") should win sequentially!
+    assert verdict.action == "allow"
+    assert verdict.matched_rule_index == 0
+

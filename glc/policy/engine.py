@@ -109,8 +109,6 @@ class PolicyEngine:
         with self._lock:
             rules = list(self.config.rules)
 
-        deny_match: tuple[int, PolicyRule] | None = None
-        first_match: tuple[int, PolicyRule] | None = None
         for i, rule in enumerate(rules):
             if rule.tool != "*" and rule.tool != tool:
                 continue
@@ -120,19 +118,13 @@ class PolicyEngine:
                 continue
             if rule.condition and not _matches_condition(rule.condition, params):
                 continue
-            if first_match is None:
-                first_match = (i, rule)
-            if rule.action == "deny" and deny_match is None:
-                deny_match = (i, rule)
-
-        if deny_match is not None:
-            i, r = deny_match
-            return PolicyVerdict(action="deny", reason=r.reason or "denied by policy", matched_rule_index=i)
-        if first_match is not None:
-            i, r = first_match
+            # First matching rule wins
             return PolicyVerdict(
-                action=r.action, reason=r.reason or f"matched rule #{i}", matched_rule_index=i
+                action=rule.action,
+                reason=rule.reason or ("denied by policy" if rule.action == "deny" else f"matched rule #{i}"),
+                matched_rule_index=i,
             )
+
         if trust_level == "owner_paired":
             return PolicyVerdict(action="allow", reason="default-allow for owner_paired")
         return PolicyVerdict(action="deny", reason=f"default-deny for trust_level={trust_level}")
