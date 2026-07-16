@@ -793,6 +793,28 @@ async def list_providers(request: Request):
 
 
 @router.get("/v1/capabilities")
+@router.get("/v1/capabilities")
+async def capabilities(request: Request):
+    # Add authentication check
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(401, "Authentication required")
+    
+    r = request.app.state.router
+    out = {}
+    for name, p in r.providers.items():
+        caps = dict(getattr(p, "capabilities", {}))
+        caps = P.model_capabilities(name, p.model, caps)
+        caps["model"] = p.model
+        caps.update(
+            {
+                "max_ctx": LIMITS[name]["max_ctx"],
+                "rpm": LIMITS[name]["rpm"],
+                "rpd": LIMITS[name]["rpd"],
+            }
+        )
+        out[name] = caps
+    return out
 async def capabilities(request: Request):
     r = request.app.state.router
     out = {}
