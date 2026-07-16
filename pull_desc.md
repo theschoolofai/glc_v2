@@ -87,6 +87,8 @@ uv run pytest tests/test_security.py -k test_classifier_prompt_injection_escapin
 **The fix.** 
 This pull request XML-escapes any user input in the content sample and wraps it inside `<sample>...</sample>` tags, and updates the `ROUTER_PROMPT` system block to explicitly instruct the model to treat the sample tags strictly as data and never execute any commands found inside them.
 
+---
+
 ## Finding 5: Fail-Open Verification in HTTP Webhook Registration Gating
 
 **What it is.** 
