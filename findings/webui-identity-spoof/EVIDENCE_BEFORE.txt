@@ -1,0 +1,6 @@
+[1] real owner paired once, as the legitimate flow would leave it: 'owner-uuid-123'
+[2] a second, unrelated WS frame claims the same user_id with zero credentials:
+    on_message(...) -> trust_level='owner_paired', channel_user_id='owner-uuid-123'
+
+RESULT: VULNERABLE - a WS frame with no session credential of any kind was classified owner_paired purely by echoing back a known/guessed user_id.
+exit code: 1

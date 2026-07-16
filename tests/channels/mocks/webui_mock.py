@@ -30,8 +30,10 @@ OWNER_SESSION = "browser-owner-001"
 STRANGER_SESSION = "browser-guest-002"
 
 
-def _user_message_frame(*, session_id: str, user_id: str, text: str) -> dict[str, Any]:
-    return {
+def _user_message_frame(
+    *, session_id: str, user_id: str, text: str, session_token: str | None = None
+) -> dict[str, Any]:
+    frame: dict[str, Any] = {
         "type": "user_message",
         "session_id": session_id,
         "user_id": user_id,
@@ -40,6 +42,9 @@ def _user_message_frame(*, session_id: str, user_id: str, text: str) -> dict[str
         "attachments": [],
         "client_ts": 1700000000000,
     }
+    if session_token is not None:
+        frame["session_token"] = session_token
+    return frame
 
 
 @dataclass
@@ -49,8 +54,10 @@ class WebuiMock:
     rate_limited: bool = False
     _disconnect_pending: bool = False
 
-    def queue_owner_message(self, text: str = "hello") -> dict[str, Any]:
-        ev = _user_message_frame(session_id=OWNER_SESSION, user_id=OWNER_USER_ID, text=text)
+    def queue_owner_message(self, text: str = "hello", *, session_token: str | None = None) -> dict[str, Any]:
+        ev = _user_message_frame(
+            session_id=OWNER_SESSION, user_id=OWNER_USER_ID, text=text, session_token=session_token
+        )
         self.inbound_events.append(ev)
         return ev
 
