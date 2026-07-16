@@ -42,10 +42,12 @@ def _isolated_glc_state(monkeypatch, tmp_path):
 def app_client():
     """TestClient pointed at a freshly-booted glc.main:app."""
     from fastapi.testclient import TestClient
+    from glc.config import get_or_create_install_token
 
     import glc.main as m
 
-    with TestClient(m.app) as c:
+    token = get_or_create_install_token()
+    with TestClient(m.app, headers={"Authorization": f"Bearer {token}"}) as c:
         yield c
 
 

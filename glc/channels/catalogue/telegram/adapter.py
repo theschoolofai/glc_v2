@@ -36,6 +36,17 @@ class Adapter(ChannelAdapter):
                     arrived_at=datetime.now(UTC),
                 )
 
+        if isinstance(raw, dict) and "raw_body" in raw:
+            try:
+                import json
+
+                body = raw["raw_body"]
+                if isinstance(body, bytes):
+                    body = body.decode("utf-8")
+                raw = json.loads(body)
+            except Exception:
+                return None
+
         update = TelegramUpdate.model_validate(raw)
 
         if update.message is None:

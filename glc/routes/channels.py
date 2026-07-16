@@ -18,7 +18,7 @@ import hmac
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from glc.audit import append as audit_append
@@ -33,13 +33,11 @@ router = APIRouter()
 
 
 @router.websocket("/v1/channels/{name}")
-async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+async def channel_ws(websocket: WebSocket, name: str):
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
-        presented = token
     expected = get_or_create_install_token()
     if presented != expected:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -65,6 +63,24 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            if env.channel != name:
+                audit_append(
+                    channel=env.channel,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="channel_spoof_attempt",
+                    result={"reason": f"envelope channel '{env.channel}' does not match route '{name}'"},
+                )
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "error": f"channel mismatch: envelope channel '{env.channel}' does not match route '{name}'"
+                        }
+                    )
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
 
             ok, why = allowed(
                 env.channel,
@@ -125,6 +141,8 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=403, detail="Webhook verify token not configured on server")
     if mode == "subscribe" and hmac.compare_digest(token, expected):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403)
@@ -132,18 +150,40 @@ async def channel_webhook_verify(name: str, request: Request):
 
 @router.post("/v1/channels/{name}/webhook")
 async def channel_webhook(name: str, request: Request):
-    try:
-        adapter = registry.instantiate(name)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
-
+    body_bytes = await request.body()
+    body_str = body_bytes.decode("utf-8", errors="replace")
     raw = {
-        "raw_body": await request.body(),
+        "raw_body": body_str,
         "headers": dict(request.headers),
     }
-    msg = await adapter.on_message(raw)
-    if msg is None:
-        return {"status": "ok"}
+
+    run_adapter = getattr(request.app.state, "run_adapter", None)
+    if run_adapter:
+        # Phase 1: Parse inbound message inside Sandbox
+        try:
+            res = await run_adapter("parse", name, raw)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Adapter sandbox error: {e}") from e
+
+        if res.get("status") == "error":
+            raise HTTPException(status_code=400, detail=res.get("error"))
+
+        msg_dict = res.get("msg")
+        if msg_dict is None:
+            return {"status": "ok"}
+        msg = ChannelMessage.model_validate(msg_dict)
+    else:
+        # Fallback to local execution
+        try:
+            adapter = registry.instantiate(name)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
+
+        raw_local = dict(raw)
+        raw_local["raw_body"] = body_bytes
+        msg = await adapter.on_message(raw_local)
+        if msg is None:
+            return {"status": "ok"}
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
@@ -191,5 +231,17 @@ async def channel_webhook(name: str, request: Request):
         text=f"[glc echo] {msg.text or ''}",
         thread_id=msg.thread_id,
     )
-    await adapter.send(reply)
+
+    if run_adapter:
+        # Phase 2: Send outbound reply inside Sandbox
+        try:
+            res_send = await run_adapter("send", name, reply.model_dump(mode="json"))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Adapter sandbox error during send: {e}") from e
+        if res_send.get("status") == "error":
+            raise HTTPException(status_code=500, detail=res_send.get("error"))
+    else:
+        # Fallback to local send
+        await adapter.send(reply)
+
     return {"status": "ok"}
