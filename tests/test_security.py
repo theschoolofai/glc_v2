@@ -179,10 +179,20 @@ async def test_dns_rebinding_ssrf_mitigation():
             ]
         }
     ]
-    # Patch httpx AsyncClient.get to verify that the request URL was rewritten to an IP address
-    import httpx
-    called_urls = []
     
+    import socket
+    import httpx
+    
+    getaddrinfo_calls = []
+    original_getaddrinfo = socket.getaddrinfo
+    
+    def mock_getaddrinfo(host, port, *args, **kwargs):
+        getaddrinfo_calls.append(host)
+        return original_getaddrinfo(host, port, *args, **kwargs)
+        
+    socket.getaddrinfo = mock_getaddrinfo
+    
+    called_urls = []
     async def mock_get(self, url, **kwargs):
         called_urls.append(url)
         mock_resp = httpx.Response(200, content=b"fake-image", headers={"content-type": "image/png"})
@@ -193,15 +203,12 @@ async def test_dns_rebinding_ssrf_mitigation():
     httpx.AsyncClient.get = mock_get
     try:
         await _resolve_image_urls(messages)
+        # Verify socket.getaddrinfo was called for example.com
+        assert "example.com" in getaddrinfo_calls
         assert len(called_urls) == 1
-        target_url = called_urls[0]
-        # Check that the request URL's hostname has been rewritten to an IP address
-        import ipaddress
-        from urllib.parse import urlparse
-        parsed = urlparse(target_url)
-        ip = ipaddress.ip_address(parsed.hostname)
-        assert ip is not None
+        assert called_urls[0] == "http://example.com/test.png"
     finally:
+        socket.getaddrinfo = original_getaddrinfo
         httpx.AsyncClient.get = original_get
 
 

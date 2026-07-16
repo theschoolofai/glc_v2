@@ -299,7 +299,7 @@ async def _resolve_image_urls(messages):
 
     async def _fetch_to_data_url(url: str) -> str:
         import socket
-        from urllib.parse import urlparse, urlunparse
+        from urllib.parse import urlparse
 
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
@@ -311,43 +311,37 @@ async def _resolve_image_urls(messages):
             if not is_safe_url(current_url):
                 raise HTTPException(400, f"unallowed image URL destination: {current_url!r}")
             
-            # Resolve domain exactly once to mitigate DNS Rebinding
             parsed = urlparse(current_url)
             hostname = parsed.hostname
             if not hostname:
                 raise HTTPException(400, f"invalid hostname in URL: {current_url!r}")
             
             try:
-                # Resolve IPv4/v6 target
-                infos = socket.getaddrinfo(hostname, None)
-                resolved_ip = infos[0][4][0]
+                # Resolve domain exactly once to verify it is safe
+                safe_infos = socket.getaddrinfo(hostname, None)
+                resolved_ip = safe_infos[0][4][0]
             except Exception as e:
                 raise HTTPException(400, f"failed to resolve hostname {hostname}: {e}")
 
-            # Reconstruct URL to directly point to the resolved IP
-            netloc = resolved_ip
-            if ":" in resolved_ip and not resolved_ip.startswith("["):
-                netloc = f"[{resolved_ip}]"
-            if parsed.port:
-                netloc = f"{netloc}:{parsed.port}"
-            
-            request_url = urlunparse((
-                parsed.scheme,
-                netloc,
-                parsed.path,
-                parsed.params,
-                parsed.query,
-                parsed.fragment
-            ))
+            # Monkey-patch socket.getaddrinfo temporarily for the request to enforce the resolved IP
+            original_getaddrinfo = socket.getaddrinfo
+            def secure_getaddrinfo(host, port, *args, **kwargs):
+                if host == hostname:
+                    port_val = port or (443 if parsed.scheme == "https" else 80)
+                    return [
+                        (family, socktype, proto, canonname, (resolved_ip, port_val))
+                        for family, socktype, proto, canonname, _ in safe_infos
+                    ]
+                return original_getaddrinfo(host, port, *args, **kwargs)
 
-            req_headers = dict(headers)
-            req_headers["Host"] = hostname # Retain the original host header for TLS SNI / routing
-
+            socket.getaddrinfo = secure_getaddrinfo
             try:
-                async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=req_headers) as c:
-                    r = await c.get(request_url)
+                async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
+                    r = await c.get(current_url)
             except _httpx.HTTPError as e:
                 raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+            finally:
+                socket.getaddrinfo = original_getaddrinfo
 
             if r.status_code in (301, 302, 303, 307, 308):
                 redirect_url = r.headers.get("Location")
