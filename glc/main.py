@@ -31,6 +31,8 @@ from glc.routes import control as control_route  # noqa: E402
 from glc.routes import speak as speak_route  # noqa: E402
 from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
+from glc.security.dataplane_auth import DataPlaneAuthMiddleware  # noqa: E402
+from glc.security.dataplane_limits import DataPlaneRateLimitMiddleware  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
 
@@ -74,6 +76,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
+
+# A1/A2/C5: auth + docs gate + rate limits on public Modal deploys
+# (GLC_DATA_PLANE_AUTH / GLC_DISABLE_DOCS set in modal_app.py).
+app.add_middleware(DataPlaneRateLimitMiddleware)
+app.add_middleware(DataPlaneAuthMiddleware)
 
 app.include_router(chat_route.router)
 app.include_router(transcribe_route.router)
