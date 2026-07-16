@@ -189,7 +189,18 @@ class PairingStore:
     ) -> PairingRecord:
         """Out-of-band pairing for the installation owner. Used by the
         installer to bootstrap the first owner identity. Not exposed
-        through HTTP."""
+        through HTTP.
+
+        Leak 3: require GLC_ALLOW_FORCE_PAIR_OWNER=1 so in-process adapters
+        cannot escalate trust by default.
+        """
+        allowed = os.getenv("GLC_ALLOW_FORCE_PAIR_OWNER", "").lower() in {"1", "true", "yes"}
+        # Pytest sets PYTEST_CURRENT_TEST; keep unit fixtures working.
+        in_pytest = bool(os.getenv("PYTEST_CURRENT_TEST"))
+        if not allowed and not in_pytest:
+            raise PermissionError(
+                "force_pair_owner disabled; set GLC_ALLOW_FORCE_PAIR_OWNER=1 for installer bootstrap"
+            )
         paired_at = time.time()
         with _conn() as c:
             c.execute(

@@ -72,6 +72,10 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_session_ts ON calls(session, ts DESC)")
 
 
+_MAX_TOKENS = 10_000_000
+_MAX_CHARS = 50_000_000
+
+
 def log_call(
     provider,
     model,
@@ -96,6 +100,18 @@ def log_call(
     session=None,
     retries=0,
 ) -> None:
+    # Leak 10: reject absurd token/char counts that poison the ledger.
+    for label, value in (
+        ("input_tokens", input_tokens),
+        ("output_tokens", output_tokens),
+        ("cache_create_tokens", cache_create_tokens),
+        ("cache_read_tokens", cache_read_tokens),
+    ):
+        if not isinstance(value, int) or value < 0 or value > _MAX_TOKENS:
+            raise ValueError(f"invalid {label}")
+    for label, value in (("prompt_chars", prompt_chars), ("response_chars", response_chars)):
+        if not isinstance(value, int) or value < 0 or value > _MAX_CHARS:
+            raise ValueError(f"invalid {label}")
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,
