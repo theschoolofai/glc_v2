@@ -23,6 +23,8 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.config as _cfg
 
     _cfg.CONFIG_DIR = cfg
+    _cfg._cached_install_token = None
+    monkeypatch.delenv("GLC_INSTALL_TOKEN", raising=False)
     import glc.security.pairing as _p
 
     _p._singleton = None

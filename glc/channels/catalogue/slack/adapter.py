@@ -55,13 +55,23 @@ class Adapter(ChannelAdapter):
                 arrived_at=datetime.now(UTC),
             )
 
-        # Unwrap Slack's event_callback wrapper
-        event = raw.get("event", raw)
-
-        user_id: str = event.get("user", "")
-        text: str = event.get("text", "")
-        channel_id: str = event.get("channel", "")
+        # Unwrap Slack's event_callback wrapper. Gateway may also pass
+        # raw_body/headers alongside the parsed JSON.
+        if not isinstance(raw, dict):
+            return None
+        event = raw.get("event") if isinstance(raw.get("event"), dict) else raw
+        if not isinstance(event, dict):
+            return None
+        # Live finding: empty/junk bodies became ChannelMessage with user="".
+        user_id: str = str(event.get("user") or "")
+        if not user_id or user_id == "raw_body":
+            return None
+        text: str = str(event.get("text") or "")
+        channel_id: str = str(event.get("channel") or "")
         thread_ts: str | None = event.get("thread_ts")
+        if isinstance(thread_ts, (int, float)):
+            thread_ts = str(thread_ts)
+
 
         # Determine trust level using the pairing store
         trust_level = classify("slack", user_id)

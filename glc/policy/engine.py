@@ -167,3 +167,27 @@ def reload_engine() -> None:
 
 def evaluate(tool_call: dict[str, Any], context: dict[str, Any]) -> PolicyVerdict:
     return get_engine().evaluate(tool_call, context)
+
+
+def _seal_evaluate_against_monkeypatch() -> None:
+    """Leak 5: reject rebinding glc.policy.engine.evaluate at runtime."""
+    import sys
+    import types
+
+    mod = sys.modules[__name__]
+
+    class _Sealed(types.ModuleType):
+        def __setattr__(self, name: str, value: Any) -> None:  # type: ignore[override]
+            if name == "evaluate" and getattr(self, "_glc_sealed", False):
+                raise AttributeError("glc.policy.engine.evaluate is sealed")
+            super().__setattr__(name, value)
+
+    try:
+        mod.__class__ = _Sealed  # type: ignore[assignment]
+        mod._glc_sealed = True  # type: ignore[attr-defined]
+    except TypeError:
+        # Some interpreters refuse ModuleType subclass swaps; leave unsealed.
+        pass
+
+
+_seal_evaluate_against_monkeypatch()

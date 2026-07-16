@@ -26,3 +26,16 @@ CREATE TABLE IF NOT EXISTS audit_schema (
     applied_at REAL NOT NULL
 );
 INSERT OR IGNORE INTO audit_schema (version, applied_at) VALUES (1, strftime('%s','now'));
+
+-- Leak 2 / invariant 7: refuse DELETE/UPDATE even if in-process code opens sqlite3.
+CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+BEFORE UPDATE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+BEFORE DELETE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;

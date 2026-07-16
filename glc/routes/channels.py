@@ -34,14 +34,16 @@ router = APIRouter()
 
 @router.websocket("/v1/channels/{name}")
 async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+    # C3: header-only auth — query ?token= is rejected (lands in access logs).
+    if token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
-        presented = token
     expected = get_or_create_install_token()
-    if presented != expected:
+    if not presented or not hmac.compare_digest(presented, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -65,6 +67,21 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # C2 / leak 9: envelope channel must match the WebSocket path.
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="channel_spoof_reject",
+                    result={"claimed": env.channel, "path": name},
+                )
+                await websocket.send_text(
+                    json.dumps({"error": "channel mismatch: envelope.channel must match path"})
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
 
             ok, why = allowed(
                 env.channel,
@@ -125,6 +142,9 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
+    # Part 2: empty/missing VERIFY_TOKEN must not authenticate (compare_digest("", "") is True).
+    if not expected or not token:
+        raise HTTPException(status_code=403)
     if mode == "subscribe" and hmac.compare_digest(token, expected):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403)
@@ -137,13 +157,39 @@ async def channel_webhook(name: str, request: Request):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
 
-    raw = {
-        "raw_body": await request.body(),
-        "headers": dict(request.headers),
-    }
-    msg = await adapter.on_message(raw)
+    body = await request.body()
+    headers = dict(request.headers)
+    raw: dict = {"raw_body": body, "headers": headers}
+    # Some adapters (Slack) expect the parsed Events API JSON at the top level;
+    # signature-verifying adapters keep using raw_body/headers.
+    if body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                raw = {**parsed, "raw_body": body, "headers": headers}
+        except Exception:
+            pass
+
+    try:
+        msg = await adapter.on_message(raw)
+    except Exception as e:
+        # Live finding: telegram/discord ValidationError became HTTP 500 for any
+        # anonymous junk POST — fail closed with 400 instead.
+        print(f"[glc] webhook {name} parse error: {e!r}")
+        raise HTTPException(status_code=400, detail="invalid webhook payload") from e
     if msg is None:
         return {"status": "ok"}
+
+    # Part 2: HTTP webhook path must match envelope channel (WS spoof was L9; this is the HTTP twin).
+    if msg.channel != name:
+        audit_append(
+            channel=name,
+            channel_user_id=msg.channel_user_id,
+            trust_level=msg.trust_level,
+            event_type="channel_spoof_reject",
+            result={"claimed": msg.channel, "path": name, "via": "webhook"},
+        )
+        raise HTTPException(status_code=403, detail="channel mismatch")
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
