@@ -638,7 +638,18 @@ async def chat(req: ChatRequest, request: Request):
 
 
 @router.post("/v1/chat/batch")
-async def chat_batch(req: BatchChatRequest, request: Request):
+async def chat_batch(request: Request):
+    import json
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid request format. Please check your input.")
+    
+    if "calls" not in body:
+        raise HTTPException(400, "Invalid request format. Please check your input.")
+    
+    req = BatchChatRequest(**body)
+    
     sem = _asyncio.Semaphore(max(1, req.max_concurrency))
 
     async def _one(call: ChatRequest):
@@ -651,10 +662,7 @@ async def chat_batch(req: BatchChatRequest, request: Request):
                 return {"error": str(e)[:400], "status_code": 500}
 
     results = await _asyncio.gather(*[_one(c) for c in req.calls])
-    return {"results": results}
-
-
-@router.post("/v1/vision")
+    return {"results": results}@router.post("/v1/vision")
 async def vision(req: VisionRequest, request: Request):
     content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
     content.append({"type": "image_url", "image_url": {"url": req.image}})
