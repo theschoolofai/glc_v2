@@ -1,31 +1,21 @@
-# Part 2 — file this PR only
+# Part 2 candidates
 
-## Bug A — Empty webhook verify token authenticates (SCORE THIS)
+## File this PR — Bug A (empty webhook verify)
 
-Branch: `part2/empty-webhook-verify` (based on `upstream/main`, single-purpose).
+Branch: `part2/empty-webhook-verify` (from `upstream/main`).
 
-**What it is.** `GET /v1/channels/{name}/webhook` used
-`hmac.compare_digest(hub.verify_token, env TOKEN)` with both sides defaulting
-to `""`. `compare_digest("", "")` is True, so an outsider can complete a Meta-style
-subscribe challenge with no channel secret configured.
-
-**Invariant broken.** Authentication / confused-deputy resistance (Section 4 invariant 2 family — paste exact Section 4 name in the PR).
-
-**Affected component.** `glc/routes/channels.py` `channel_webhook_verify`.
-
-**Reproduction (fresh checkout of reference, before fix):**
-
-```bash
-git clone https://github.com/theschoolofai/glc_v2.git && cd glc_v2
-uv sync && uv run glc serve &
-# unset any *_VERIFY_TOKEN
-./repro_empty_webhook_verify.sh http://127.0.0.1:8111
-# vulnerable: HTTP 200 body `pwn`
-# after this PR: HTTP 403
-```
-
-**The fix.** Reject when `expected` or `token` is empty before `compare_digest`.
+**Bug.** `compare_digest("", "")` lets Meta-style subscribe succeed with no `{CHANNEL}_VERIFY_TOKEN`.  
+**Invariant.** Auth / confused-deputy (Section 4 #2 family — paste exact name).  
+**Repro.** `repro_empty_webhook_verify.sh` / `tests/test_empty_webhook_verify.py`.  
+**Host check.** Live URL returns **403** on empty verify (fix deployed).  
+**Submit.** Commands in [`SUBMIT.md`](SUBMIT.md).
 
 ## Do NOT file
 
-**HTTP webhook channel spoof** — same family as Section 7 leak 9 / Section 6 C2; high risk of zero points as a restatement.
+- HTTP webhook channel spoof → leak 9 / C2 family (0 points risk).
+
+## Next (after Bug A PR)
+
+1. **WhatsApp Meta HMAC replay** — no `message_id` / freshness dedup (best next 100 pts; race open PRs).  
+2. Slack unsigned Events API (junk drop already on `bug_fix`; full missing-signature claim may still be distinct).  
+3. Avoid re-filing anything in Section 6 A/C or Section 7 L1–L10.
