@@ -19,6 +19,7 @@ from glc.channels.base import ChannelAdapter
 from glc.channels.catalogue.webhook.schemas import WebhookInbound
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.allowlists import allowed
+from glc.security.idempotency import get_idempotency_store
 from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
 
@@ -65,6 +66,13 @@ class Adapter(ChannelAdapter):
 
         normalized_headers = {str(k): str(v) for k, v in headers.items()}
         if not self._verify(raw_body, normalized_headers):
+            return cast(ChannelMessage, None)
+
+        # Signature+timestamp prove origin and a 5-minute freshness window,
+        # but the same signed body still replays until the window ends.
+        # Hash the raw body as a single-use nonce (invariant 4).
+        body_key = sha256(raw_body).hexdigest()
+        if not get_idempotency_store().mark_seen("webhook", body_key):
             return cast(ChannelMessage, None)
 
         try:

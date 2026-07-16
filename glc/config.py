@@ -41,9 +41,25 @@ def install_token_path() -> Path:
     return CONFIG_DIR / "install_token"
 
 
+def _read_or_mint_token(path: Path) -> str:
+    if path.exists():
+        return path.read_text().strip()
+    import secrets
+
+    tok = secrets.token_urlsafe(32)
+    path.write_text(tok)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return tok
+
+
 def get_or_create_install_token() -> str:
-    """Per-installation token used to authenticate WS adapter connections
-    and /v1/control/* requests. Generated once and persisted to disk.
+    """Per-installation token for data-plane HTTP and channel WebSockets.
+
+    Part 2 / invariant 4: this token must NOT authorise /v1/control/*
+    (pairing, presence, kill). Those require get_or_create_control_token().
 
     Leak 4: channel adapters (GLC_COMPONENT_ROLE=adapter) cannot read the token.
     Prefer Authorization headers supplied by the operator over file reads.
@@ -53,15 +69,40 @@ def get_or_create_install_token() -> str:
     if component_role() == "adapter":
         raise PermissionError("install token is not readable from adapter components")
 
-    p = install_token_path()
-    if p.exists():
-        return p.read_text().strip()
-    import secrets
+    return _read_or_mint_token(install_token_path())
 
-    tok = secrets.token_urlsafe(32)
-    p.write_text(tok)
-    try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
-    return tok
+
+def control_token_path() -> Path:
+    return CONFIG_DIR / "control_token"
+
+
+def get_or_create_control_token() -> str:
+    """Operator-only token for /v1/control/* (pair, presence, kill).
+
+    Never hand this to channel bridges — they only need the install token
+    for WS / data-plane access. Adapters cannot read this file either.
+    """
+    from glc.security.isolation import component_role
+
+    if component_role() == "adapter":
+        raise PermissionError("control token is not readable from adapter components")
+
+    return _read_or_mint_token(control_token_path())
+
+
+def ledger_hmac_key_path() -> Path:
+    return CONFIG_DIR / "ledger_hmac_key"
+
+
+def get_or_create_ledger_hmac_key() -> str:
+    """Independent HMAC key for cost-ledger write signatures.
+
+    Must not be derived from the install token — otherwise any bridge that
+    holds the install bearer can forge Part-1 leak-10 signatures.
+    """
+    from glc.security.isolation import component_role
+
+    if component_role() == "adapter":
+        raise PermissionError("ledger HMAC key is not readable from adapter components")
+
+    return _read_or_mint_token(ledger_hmac_key_path())

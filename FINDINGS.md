@@ -25,7 +25,9 @@ uv sync
 uv run pytest tests/test_part1_hardening.py tests/test_v9_compat.py -q
 
 # Token for curl (after one boot, or read from config dir)
-uv run glc token   # or: cat $GLC_CONFIG_DIR/install_token
+uv run glc token install   # data plane + WS
+uv run glc token control   # /v1/control/* (Part 2 scoped credential)
+# or: cat $GLC_CONFIG_DIR/install_token  /  control_token
 
 # Modal (mock secret already created)
 uv run modal deploy modal_app.py
@@ -67,7 +69,7 @@ export BASE=https://<your-modal-url>
 | **C3** | WS `?token=` in query string | 4 | outsider (log scraper) | Connect with `?token=` | Header-only `Authorization: Bearer`; query ignored | Connect with `?token=` only → close **1008**. Connect with header → OK. Bridges updated. |
 | **C4** | Verbose upstream errors on `/v1/chat` | 1 (disclosure) | outsider | Response contained provider names/endpoints/exception text | Generic `upstream provider failed` / `all providers unavailable`; detail in server logs | Authed chat with mock keys → body has no `googleapis` / traceback (`test_c4_chat_errors_are_generic`). |
 | **C5** | No rate limits / budget on data plane | 8 | outsider | Flood `/v1/chat` | `DataPlaneLimiter` RPM + daily token/cost caps; successful calls call `record_usage()` so budgets accumulate | Set `GLC_DATA_PLANE_RPM=2`, burst 3 POSTs → third **429**. Set `GLC_DATA_PLANE_MAX_TOKENS_DAY` low and complete successful calls → later **429** with token budget message. |
-| **C6** | Pairing-code brute force | 2 | outsider with leaked install token | Rapid `/v1/control/pair/confirm` guesses | `PairingConfirmLimiter` (default 10/min) | Loop confirm with bad codes → **429** after limit. |
+| **C6** | Pairing-code brute force | 2 | outsider with leaked **control** token | Rapid `/v1/control/pair/confirm` guesses | `PairingConfirmLimiter` (default 10/min) | Loop confirm with bad codes → **429** after limit. (Part 2: confirm requires `control_token`, not install token.) |
 
 ---
 
@@ -100,3 +102,136 @@ export BASE=https://<your-modal-url>
 ## Remaining architectural debt (honest)
 
 Move 1 still runs one Function. Leaks **6** and **8** are only fully closed when adapters run in separate Modal Sandboxes/Functions with their own Secrets, egress allowlists, and PID namespaces. This clone adds the application-layer walls and deploy constraints that make the classic Section 6/7 repros **fail** for the required Part 1 floor.
+
+---
+
+# Part 2 Findings — new invariant breaks (not in §§6–7)
+
+Checked open PRs on `theschoolofai/glc_v2` before investing. Skipped already-claimed items (trust_level wire spoof #10/#11/#15, empty verify token #12/#36, batch ceilings, schema bombs, etc.).
+
+**How to run Part 2 regressions**
+
+```bash
+uv sync
+uv run pytest tests/test_part2_findings.py tests/test_control_plane.py -q
+```
+
+Tokens (after one boot / config dir exists):
+
+```bash
+uv run glc token install   # data plane + channel WebSockets
+uv run glc token control   # /v1/control/* only
+uv run glc token both
+```
+
+---
+
+## P2-A — One install token authorised control plane + ledger HMAC (invariant 4)
+
+| | |
+|--|--|
+| **Invariant** | 4 — a credential must work only for one specific tool call |
+| **Attacker** | Any process handed the install token (channel bridge), or anyone who steals it |
+| **Files** | `glc/config.py`, `glc/security/auth.py`, `glc/routes/control.py`, `glc/security/isolation.py` |
+
+**Before (repro)**
+
+```bash
+export TOKEN=$(uv run glc token)   # same secret a bridge needs for WS
+# Bridge credential also minted pairings, listed presence, and could forge ledger HMACs:
+curl -s $BASE/v1/control/presence -H "Authorization: Bearer $TOKEN"   # 200 + all paired ids
+python -c "from glc.security.isolation import sign_ledger_write; print(sign_ledger_write('gemini','x',1,1,'v'))"
+# (ledger HMAC key == install_token)
+```
+
+**Fix**
+
+- Distinct `control_token` for `/v1/control/*` (pair / confirm / presence / kill).
+- Data plane + channel WS still use `install_token`.
+- Cost-ledger HMAC key is a separate `ledger_hmac_key` file — not derived from the install bearer.
+
+**After (how to test)**
+
+```bash
+export INSTALL=$(uv run glc token install)
+export CONTROL=$(uv run glc token control)
+curl -s $BASE/v1/control/presence -H "Authorization: Bearer $INSTALL"   # → 401
+curl -s $BASE/v1/control/presence -H "Authorization: Bearer $CONTROL"   # → 200
+curl -s -X POST $BASE/v1/chat -H "Authorization: Bearer $INSTALL" -H "content-type: application/json" -d '{"prompt":"hi"}'  # still authorised (then provider logic)
+uv run pytest tests/test_part2_findings.py -k "install_token_cannot or control_token or ledger_hmac" -q
+```
+
+---
+
+## P2-B — WhatsApp / generic webhook signature replay (invariants 4, 8)
+
+| | |
+|--|--|
+| **Invariant** | 4 (authorising message must bind to one use) and 8 (each replay burns another turn) |
+| **Attacker** | Outsider who captured one signed webhook body (log leak, broken TLS, misconfigured proxy) |
+| **Files** | `glc/security/idempotency.py`, `glc/channels/catalogue/whatsapp/adapter.py`, `glc/channels/catalogue/webhook/adapter.py` |
+
+**Before (repro)**
+
+Meta `X-Hub-Signature-256` (and the Stripe-style generic webhook HMAC) prove origin/integrity but not single-use. Re-POSTing the same body within the freshness window delivered another `ChannelMessage` / agent turn.
+
+```python
+# Conceptual — capture one valid signed Meta webhook, POST twice to /v1/channels/whatsapp/webhook
+# Both returned 200 and both produced inbound_message audit rows / echoes.
+```
+
+**Fix**
+
+- Persistent `IdempotencyStore` (SQLite under `GLC_CONFIG_DIR`).
+- WhatsApp: `mark_seen("whatsapp:{provider}", message_id)` before building the envelope.
+- Generic webhook: `mark_seen("webhook", sha256(raw_body))` after signature verify.
+
+**After (how to test)**
+
+```bash
+uv run pytest tests/test_part2_findings.py -k "whatsapp_rejects_replay or webhook_rejects_replay" -q
+# Expect: first delivery builds ChannelMessage; identical second body → None / no second turn
+```
+
+---
+
+## P2-C — Slack skipped `allowlists.allowed()` in public channels (invariant 2)
+
+| | |
+|--|--|
+| **Invariant** | 2 — every action checked against actual user + policy arguments |
+| **Attacker** | `user_paired` (or owner) Slack member in a public/group channel — no need to be untrusted |
+| **Files** | `glc/channels/catalogue/slack/adapter.py` |
+
+**Before (repro)**
+
+Discord/Telegram call `allowed()` with `was_mentioned`. Slack only dropped `trust_level == "untrusted"` in public channels, so a paired user could drive the bot without an `@mention` even when `mention_only_in_public: true`.
+
+```python
+adapter = Adapter(config={"is_public_channel": True, "bot_user_id": "UBOT"})
+msg = await adapter.on_message({"event": {"user": "<user_paired>", "text": "do X", "channel": "C1"}})
+# Before: msg is a ChannelMessage (processed). After: None.
+```
+
+**Fix**
+
+Call `allowed()` with owners + Slack `<@BOTID>` mention detection; drop public-channel messages that fail (same posture as Discord/Telegram).
+
+**After (how to test)**
+
+```bash
+uv run pytest tests/test_part2_findings.py -k slack_public_requires_mention -q
+# Owner without <@bot> → dropped; owner with <@UBOT123> → envelope
+```
+
+---
+
+## Part 2 fix map
+
+| ID | Cluster |
+|----|---------|
+| P2-A | `glc/config.py`, `glc/security/auth.py`, `glc/routes/control.py`, `glc/security/isolation.py`, `glc/cli.py` |
+| P2-B | `glc/security/idempotency.py`, WhatsApp + webhook adapters |
+| P2-C | `glc/channels/catalogue/slack/adapter.py` |
+
+Open a PR against school `glc_v2` per finding (description + fresh-checkout repro + fix) once you are ready to claim points; first PR wins on duplicates.

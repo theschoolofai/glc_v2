@@ -49,6 +49,12 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.audit.store as _a
 
     _a._singleton = None
+    import glc.security.idempotency as _idem
+
+    _idem._store = None
+    import glc.security.isolation as _iso
+
+    _iso._ledger_hmac_key = None
     yield
 
 
@@ -72,8 +78,21 @@ def install_token(app_client):
 
 
 @pytest.fixture
+def control_token(app_client):
+    """Operator control-plane token (distinct from install / adapter token)."""
+    from glc.config import get_or_create_control_token
+
+    return get_or_create_control_token()
+
+
+@pytest.fixture
 def auth_headers(install_token):
     return {"Authorization": f"Bearer {install_token}"}
+
+
+@pytest.fixture
+def control_headers(control_token):
+    return {"Authorization": f"Bearer {control_token}"}
 
 
 @pytest.fixture

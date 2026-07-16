@@ -13,7 +13,7 @@ from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
-from glc.config import get_or_create_install_token
+from glc.config import get_or_create_control_token, get_or_create_install_token
 
 # Paths that remain reachable without a bearer token (health + injectors).
 _PUBLIC_PREFIXES = (
@@ -22,6 +22,8 @@ _PUBLIC_PREFIXES = (
 )
 _PUBLIC_EXACT = frozenset({"/healthz", "/"})
 _WEBHOOK_SUFFIX = "/webhook"
+_CONTROL_PREFIX = "/v1/control/"
+
 
 
 def auth_enabled() -> bool:
@@ -55,12 +57,29 @@ def verify_install_token(presented: str | None) -> bool:
     return hmac.compare_digest(presented, expected)
 
 
+def verify_control_token(presented: str | None) -> bool:
+    """Operator control-plane token — distinct from the install / adapter token."""
+    if not presented:
+        return False
+    expected = get_or_create_control_token()
+    return hmac.compare_digest(presented, expected)
+
+
 def require_install_token(authorization: str | None) -> None:
     if not verify_install_token(extract_bearer(authorization)):
         raise HTTPException(
             401,
             "missing or invalid bearer token (Authorization: Bearer <install_token>)",
         )
+
+
+def require_control_token(authorization: str | None) -> None:
+    if not verify_control_token(extract_bearer(authorization)):
+        raise HTTPException(
+            401,
+            "missing or invalid control token (Authorization: Bearer <control_token>)",
+        )
+
 
 
 def _is_public(path: str) -> bool:
@@ -86,7 +105,15 @@ class DataPlaneAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if path.startswith("/v1/") or path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
             presented = extract_bearer(request.headers.get("authorization"))
-            if not verify_install_token(presented):
+            # Invariant 4: control plane requires a distinct operator token;
+            # install token (handed to adapters) must not authorise pair/kill/presence.
+            if path.startswith(_CONTROL_PREFIX):
+                if not verify_control_token(presented):
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "missing or invalid control token"},
+                    )
+            elif not verify_install_token(presented):
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "missing or invalid bearer token"},

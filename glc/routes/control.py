@@ -14,7 +14,7 @@ import time
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from glc.security.auth import extract_bearer, verify_install_token
+from glc.security.auth import require_control_token
 from glc.security.data_plane_limits import get_pairing_confirm_limiter
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
 
@@ -22,10 +22,8 @@ router = APIRouter()
 
 
 def _require_token(authorization: str | None) -> None:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
-    if not verify_install_token(extract_bearer(authorization)):
-        raise HTTPException(403, "install token mismatch")
+    """Control plane uses the operator control token, not the install token."""
+    require_control_token(authorization)
 
 
 class PairRequest(BaseModel):

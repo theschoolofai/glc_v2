@@ -162,11 +162,12 @@ def subprocess_allowed(executable: str) -> bool:
 
 
 def ledger_signing_key() -> bytes:
+    """HMAC key for cost-ledger writes — independent of any bearer token."""
     global _ledger_hmac_key
     if _ledger_hmac_key is None:
-        from glc.config import get_or_create_install_token
+        from glc.config import get_or_create_ledger_hmac_key
 
-        _ledger_hmac_key = get_or_create_install_token().encode("utf-8")
+        _ledger_hmac_key = get_or_create_ledger_hmac_key().encode("utf-8")
     return _ledger_hmac_key
 
 

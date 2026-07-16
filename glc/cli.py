@@ -16,7 +16,17 @@ def main() -> int:
     p_serve.add_argument("--port", type=int, default=int(os.getenv("GLC_PORT", "8111")))
     p_serve.add_argument("--reload", action="store_true")
 
-    sub.add_parser("token", help="print the per-installation control token")
+    p_token = sub.add_parser(
+        "token",
+        help="print tokens (install for data/WS; control for /v1/control/*)",
+    )
+    p_token.add_argument(
+        "which",
+        nargs="?",
+        default="install",
+        choices=("install", "control", "both"),
+        help="which token to print (default: install)",
+    )
     sub.add_parser("channels", help="list channels discovered in the catalogue")
 
     args = parser.parse_args()
@@ -27,9 +37,12 @@ def main() -> int:
         uvicorn.run("glc.main:app", host=args.host, port=args.port, reload=args.reload)
         return 0
     if args.cmd == "token":
-        from glc.config import get_or_create_install_token
+        from glc.config import get_or_create_control_token, get_or_create_install_token
 
-        print(get_or_create_install_token())
+        if args.which in ("install", "both"):
+            print(get_or_create_install_token() if args.which == "install" else f"install={get_or_create_install_token()}")
+        if args.which in ("control", "both"):
+            print(get_or_create_control_token() if args.which == "control" else f"control={get_or_create_control_token()}")
         return 0
     if args.cmd == "channels":
         from glc.channels.registry import discover
