@@ -638,7 +638,18 @@ async def chat(req: ChatRequest, request: Request):
 
 
 @router.post("/v1/chat/batch")
-async def chat_batch(req: BatchChatRequest, request: Request):
+async def chat_batch(request: Request):
+    import json
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid request format. Please check your input.")
+    
+    if "calls" not in body:
+        raise HTTPException(400, "Invalid request format. Please check your input.")
+    
+    req = BatchChatRequest(**body)
+    
     sem = _asyncio.Semaphore(max(1, req.max_concurrency))
 
     async def _one(call: ChatRequest):
@@ -651,10 +662,7 @@ async def chat_batch(req: BatchChatRequest, request: Request):
                 return {"error": str(e)[:400], "status_code": 500}
 
     results = await _asyncio.gather(*[_one(c) for c in req.calls])
-    return {"results": results}
-
-
-@router.post("/v1/vision")
+    return {"results": results}@router.post("/v1/vision")
 async def vision(req: VisionRequest, request: Request):
     content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
     content.append({"type": "image_url", "image_url": {"url": req.image}})
@@ -785,6 +793,28 @@ async def list_providers(request: Request):
 
 
 @router.get("/v1/capabilities")
+@router.get("/v1/capabilities")
+async def capabilities(request: Request):
+    # Add authentication check
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(401, "Authentication required")
+    
+    r = request.app.state.router
+    out = {}
+    for name, p in r.providers.items():
+        caps = dict(getattr(p, "capabilities", {}))
+        caps = P.model_capabilities(name, p.model, caps)
+        caps["model"] = p.model
+        caps.update(
+            {
+                "max_ctx": LIMITS[name]["max_ctx"],
+                "rpm": LIMITS[name]["rpm"],
+                "rpd": LIMITS[name]["rpd"],
+            }
+        )
+        out[name] = caps
+    return out
 async def capabilities(request: Request):
     r = request.app.state.router
     out = {}
@@ -803,18 +833,20 @@ async def capabilities(request: Request):
     return out
 
 
+@router.get("/v1/routers")
 @router.get("/v1/status")
 async def status(request: Request):
-    r = request.app.state.router
+    # Add authentication check here
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(401, "Authentication required")
+    
+    # Return only safe, non-sensitive information
     return {
-        "order": r.order,
-        "live": r.all_status(),
-        "today": db.aggregate(call_role="worker"),
-        "limits": LIMITS,
+        "status": "healthy",
+        "version": "1.0",
+        "timestamp": time.time()
     }
-
-
-@router.get("/v1/routers")
 async def routers(request: Request):
     rp = request.app.state.router_pool
     return {
@@ -829,5 +861,9 @@ async def routers(request: Request):
 
 
 @router.get("/v1/calls")
-async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
-    return db.recent(limit=limit, provider=provider, status=status)
+async def calls(request: Request, limit: int = 100, provider: str | None = None, status: str | None = None):
+    # Add authentication check
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(401, "Authentication required")
+    
