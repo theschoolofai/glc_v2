@@ -23,6 +23,7 @@ from glc.channels.catalogue.whatsapp.schemas import (
 )
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.allowlists import allowed
+from glc.security.idempotency import get_idempotency_store
 from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import TrustLevel, classify
 
@@ -301,6 +302,14 @@ class Adapter(ChannelAdapter):
 
         if parsed is None:
             return None
+
+        # Part 2: Meta/Twilio signatures prove origin but not freshness.
+        # Refuse a repeated messages[].id / MessageSid so a captured body
+        # cannot burn another agent turn (invariant 4 / 8).
+        delivery_key = parsed.message_id
+        if delivery_key:
+            if not get_idempotency_store().mark_seen(f"whatsapp:{provider}", delivery_key):
+                return None
 
         owner_ids = [r.channel_user_id for r in get_pairing_store().owners("whatsapp")]
         trust = classify("whatsapp", parsed.from_id)

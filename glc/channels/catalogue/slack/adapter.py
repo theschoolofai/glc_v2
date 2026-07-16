@@ -10,17 +10,27 @@ Key Slack concepts implemented:
                           ChannelReply.thread_id → outbound thread_ts
   - Rate limit (429) propagation
   - Disconnect recovery (no raise)
-  - Public channel stranger handling
+  - Public channel stranger handling + mention_only_in_public via allowlists
 """
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.security.allowlists import allowed
+from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
+
+# Slack user / bot mentions look like <@U123ABC> or <@U123ABC|name>.
+_MENTION_RE = re.compile(r"<@([A-Z0-9]+)(?:\|[^>]+)?>")
+
+
+def _extract_mention_ids(text: str) -> set[str]:
+    return set(_MENTION_RE.findall(text or ""))
 
 
 class Adapter(ChannelAdapter):
@@ -66,9 +76,22 @@ class Adapter(ChannelAdapter):
         # Determine trust level using the pairing store
         trust_level = classify("slack", user_id)
 
-        # Public channel: silently drop strangers
-        is_public = self.config.get("is_public_channel", False)
-        if is_public and trust_level == "untrusted":
+        is_public = bool(self.config.get("is_public_channel", False))
+        bot_user_id = str(self.config.get("bot_user_id") or "")
+        mentioned_ids = _extract_mention_ids(text)
+        was_mentioned = bool(bot_user_id) and bot_user_id in mentioned_ids
+
+        owners = [r.channel_user_id for r in get_pairing_store().owners(channel="slack")]
+        ok, _why = allowed(
+            "slack",
+            user_id,
+            owner_ids=owners,
+            is_public_channel=is_public,
+            was_mentioned=was_mentioned,
+        )
+        # Match discord/telegram: drop public-channel messages that fail allowlist
+        # (including paired users who did not @-mention the bot).
+        if is_public and not ok:
             return None
 
         return ChannelMessage(
@@ -79,7 +102,11 @@ class Adapter(ChannelAdapter):
             trust_level=trust_level,
             arrived_at=datetime.now(UTC),
             thread_id=thread_ts,
-            metadata={"slack_channel_id": channel_id},
+            metadata={
+                "slack_channel_id": channel_id,
+                "is_public_channel": is_public,
+                "was_mentioned": was_mentioned,
+            },
         )
 
     async def send(self, reply: ChannelReply) -> Any:

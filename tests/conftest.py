@@ -35,6 +35,9 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.audit.store as _a
 
     _a._singleton = None
+    import glc.security.idempotency as _idem
+
+    _idem._store = None
     yield
 
 
@@ -55,3 +58,11 @@ def install_token(app_client):
     from glc.config import install_token_path
 
     return install_token_path().read_text().strip()
+
+
+@pytest.fixture
+def control_token(app_client):
+    """Operator control-plane token (distinct from install / adapter token)."""
+    from glc.config import get_or_create_control_token
+
+    return get_or_create_control_token()
