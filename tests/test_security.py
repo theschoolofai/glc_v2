@@ -236,7 +236,24 @@ async def test_classifier_prompt_injection_escaping():
     pool = MockRouterPool()
     class MockReq:
         auto_route = "tier"
-    
     await _classify_tier(MockReq(), "decision", pool, "<script>alert(1)</script>")
+
+
+def test_webhook_verification_fail_closed(app_client, monkeypatch):
+    # 1. When the verify token environment variable is NOT set (empty), it must reject empty verify tokens
+    monkeypatch.delenv("WHATSAPP_VERIFY_TOKEN", raising=False)
+    r = app_client.get("/v1/channels/whatsapp/webhook?hub.mode=subscribe&hub.challenge=123&hub.verify_token=")
+    assert r.status_code == 403
+
+    # 2. When the verify token is configured, it must accept matching tokens
+    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", "secure-secret-token")
+    r = app_client.get("/v1/channels/whatsapp/webhook?hub.mode=subscribe&hub.challenge=123&hub.verify_token=secure-secret-token")
+    assert r.status_code == 200
+    assert r.text == "123"
+
+    # 3. Reject non-matching tokens
+    r = app_client.get("/v1/channels/whatsapp/webhook?hub.mode=subscribe&hub.challenge=123&hub.verify_token=wrong-token")
+    assert r.status_code == 403
+
 
 
