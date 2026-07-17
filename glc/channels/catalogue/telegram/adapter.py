@@ -109,8 +109,16 @@ class Adapter(ChannelAdapter):
                                 if resp.status_code == 200:
                                     res_json = resp.json()
                                     if res_json.get("ok"):
-                                        file_path = res_json["result"].get("file_path", "")
-                                        ref = f"https://api.telegram.org/file/bot{token}/{file_path}"
+                                        # Emit the token-free Telegram file handle (same
+                                        # shape the mock path returns). Do NOT embed the
+                                        # bot token in the ref: the ref travels on the
+                                        # ChannelMessage across the adapter->gateway
+                                        # boundary and can surface in the gateway's image
+                                        # resolver error path and in any envelope logging,
+                                        # leaking a full bot-control credential. The token
+                                        # stays inside the adapter, used only to authorise
+                                        # the getFile call above.
+                                        ref = res_json["result"].get("file_path", "")
                         except Exception:
                             pass
 
