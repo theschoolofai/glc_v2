@@ -19,6 +19,7 @@ import re
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.catalogue.teams.schemas import ADAPTIVE_CARD_CONTENT_TYPE
@@ -30,6 +31,42 @@ from glc.security.trust_level import classify
 _MENTION_RE = re.compile(r"<at>[^<]*</at>\s*")
 
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}  # app_id -> (token, expires_at)
+
+# Bot Framework Activities carry serviceUrl as caller-supplied JSON, the
+# same as every other field in the payload -- nothing about the wire
+# format proves it's actually a Microsoft Connector endpoint, JWT
+# verification included: a validly-signed Activity can still name any
+# serviceUrl the sender likes. send() later POSTs to exactly that URL
+# with a real, live Bot Framework bearer token attached, so an
+# unvalidated serviceUrl is a direct credential-exfiltration channel,
+# not just an SSRF probe -- one inbound message is enough to redirect
+# every future authenticated reply to an attacker-controlled endpoint.
+# Real Bot Framework Connector traffic only ever originates from these
+# Microsoft-owned domains; see Microsoft's own Bot Framework security
+# guidance on validating serviceUrl before use, independent of JWT
+# audience/issuer checks (which prove the *sender* is real, not that
+# *this specific field* is trustworthy).
+_TRUSTED_SERVICE_URL_SUFFIXES = tuple(
+    s.strip().lower()
+    for s in os.environ.get(
+        "TEAMS_TRUSTED_SERVICE_URL_SUFFIXES", "botframework.com,trafficmanager.net"
+    ).split(",")
+    if s.strip()
+)
+
+
+def _is_trusted_service_url(url: str) -> bool:
+    """https only, host must equal or be a subdomain of an allowlisted
+    Microsoft Bot Framework domain -- rejects both a bare attacker host
+    and a lookalike like "botframework.com.attacker.example"."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not parts.hostname:
+        return False
+    host = parts.hostname.lower()
+    return any(host == suffix or host.endswith("." + suffix) for suffix in _TRUSTED_SERVICE_URL_SUFFIXES)
 
 
 def _bfs_first_textblock(card: dict[str, Any]) -> str | None:
@@ -116,6 +153,15 @@ class Adapter(ChannelAdapter):
         conv = raw.get("conversation") or {}
         service_url: str = str(raw.get("serviceUrl", ""))
         conversation_id: str = str(conv.get("id", ""))
+
+        # A validly-signed Activity still names whatever serviceUrl its
+        # sender chose -- caching an untrusted one here is what lets
+        # send() later hand a real bearer token to that URL. Reject the
+        # message outright rather than silently dropping just the
+        # serviceUrl: a forged serviceUrl on an otherwise-real message
+        # is itself a signal this Activity isn't trustworthy.
+        if not _is_trusted_service_url(service_url):
+            return None
 
         trust_level = classify(self.name, user_id)
 
