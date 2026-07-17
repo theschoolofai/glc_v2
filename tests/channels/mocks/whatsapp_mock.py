@@ -103,38 +103,62 @@ class WhatsappMock:
         self._next_msg += 1
         return f"wamid.HBgL{self._next_msg}"
 
-    def queue_owner_message(self, text: str = "hello") -> dict[str, Any]:
+    def _text_envelope(self, *, from_wa_id: str, text: str, profile_name: str) -> dict[str, Any]:
         env = _text_webhook(
-            from_wa_id=OWNER_WA_ID, text=text, profile_name="owner", message_id=self._msg_id()
+            from_wa_id=from_wa_id, text=text, profile_name=profile_name, message_id=self._msg_id()
         )
         self.inbound_events.append(env)
         return env
 
-    def queue_stranger_message(self, text: str = "ping") -> dict[str, Any]:
-        env = _text_webhook(
-            from_wa_id=STRANGER_WA_ID, text=text, profile_name="stranger", message_id=self._msg_id()
+    def _as_signed_inbound(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Wrap a Meta webhook dict the way the gateway presents it."""
+        raw = json.dumps(body, separators=(",", ":")).encode()
+        return {"raw_body": raw, "headers": {"X-Hub-Signature-256": _sign(raw, self.app_secret)}}
+
+    def queue_owner_message(self, text: str = "hello") -> dict[str, Any]:
+        return self._as_signed_inbound(
+            self._text_envelope(from_wa_id=OWNER_WA_ID, text=text, profile_name="owner")
         )
-        self.inbound_events.append(env)
-        return env
+
+    def queue_stranger_message(self, text: str = "ping") -> dict[str, Any]:
+        return self._as_signed_inbound(
+            self._text_envelope(from_wa_id=STRANGER_WA_ID, text=text, profile_name="stranger")
+        )
+
+    def queue_unsigned_meta_dict(self, text: str = "unsigned") -> dict[str, Any]:
+        """Bare Meta ``entry`` dict with no signature — must be rejected."""
+        return self._text_envelope(from_wa_id=OWNER_WA_ID, text=text, profile_name="owner")
 
     def queue_signed_webhook(
         self, body: dict[str, Any] | None = None, text: str = "hi"
     ) -> tuple[bytes, dict[str, str]]:
-        body = body if body is not None else self.queue_owner_message(text)
+        if body is None:
+            body = self._text_envelope(from_wa_id=OWNER_WA_ID, text=text, profile_name="owner")
+        elif isinstance(body, dict) and "raw_body" in body:
+            raw = body["raw_body"]
+            headers = body.get("headers") or {}
+            assert isinstance(raw, bytes)
+            return raw, {str(k): str(v) for k, v in headers.items()}
         raw = json.dumps(body, separators=(",", ":")).encode()
         return raw, {"X-Hub-Signature-256": _sign(raw, self.app_secret)}
 
     def queue_unsigned_webhook(
         self, body: dict[str, Any] | None = None, text: str = "hi"
     ) -> tuple[bytes, dict[str, str]]:
-        body = body if body is not None else self.queue_owner_message(text)
+        if body is None:
+            body = self._text_envelope(from_wa_id=OWNER_WA_ID, text=text, profile_name="owner")
+        elif isinstance(body, dict) and "raw_body" in body:
+            body = json.loads(body["raw_body"])
         raw = json.dumps(body, separators=(",", ":")).encode()
         return raw, {}
 
     def queue_tampered_webhook(
         self, body: dict[str, Any] | None = None, text: str = "hi"
     ) -> tuple[bytes, dict[str, str]]:
-        body = body if body is not None else self.queue_owner_message(text)
+        if body is None:
+            body = self._text_envelope(from_wa_id=OWNER_WA_ID, text=text, profile_name="owner")
+        elif isinstance(body, dict) and "raw_body" in body:
+            body = json.loads(body["raw_body"])
         raw = json.dumps(body, separators=(",", ":")).encode()
         # Sign with a *different* secret so the verification fails.
         return raw, {"X-Hub-Signature-256": _sign(raw, "WRONG-SECRET")}

@@ -290,13 +290,9 @@ class Adapter(ChannelAdapter):
                 provider = "meta"
             else:
                 return None
-        elif isinstance(raw, dict) and raw.get("entry"):
-            parsed = parse_meta_payload(raw)
-            provider = "meta"
-        elif isinstance(raw, dict) and "From" in raw and "Body" in raw:
-            parsed = parse_twilio_payload(raw, datetime.now(UTC))
-            provider = "twilio"
         else:
+            # Unsigned Meta ``entry`` / Twilio form dicts must not be trusted —
+            # only the verified raw_body + signature path is accepted.
             return None
 
         if parsed is None:
