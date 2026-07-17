@@ -72,3 +72,36 @@ def test_jsonifies_complex_params():
     )
     rows = query(limit=1)
     assert "nested" in rows[0]["params_json"]
+
+
+def test_audit_db_defaults_under_glc_config_dir(monkeypatch, tmp_path):
+    """Without GLC_AUDIT_DB, the store must follow GLC_CONFIG_DIR (Modal volume)."""
+    from pathlib import Path
+
+    import glc.audit.store as audit_store
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    home = tmp_path / "fake_home"
+    home.mkdir()
+    monkeypatch.setenv("GLC_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("GLC_AUDIT_DB", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Windows expanduser
+    audit_store._singleton = None
+    audit_store.DEFAULT_DIR = Path(home) / ".glc"
+
+    resolved = Path(audit_store._resolve_path())
+    assert resolved == cfg / "audit.sqlite"
+    assert resolved.parent == cfg
+
+    audit_store.init_store()
+    rid = audit_store.append(
+        channel="webui",
+        channel_user_id="1",
+        trust_level="owner_paired",
+        event_type="inbound_message",
+    )
+    assert rid > 0
+    assert (cfg / "audit.sqlite").exists()
+    assert not (Path(home) / ".glc" / "audit.sqlite").exists()

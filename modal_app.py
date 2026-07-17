@@ -39,7 +39,12 @@ image = (
         "websockets>=12.0",
         "twilio>=9.0",
     )
-    .env({"GLC_CONFIG_DIR": "/data/glc"})
+    .env({
+        "GLC_CONFIG_DIR": "/data/glc",
+        # Explicit so the audit trail lands on the Volume even if a future
+        # code path forgets GLC_CONFIG_DIR (belt-and-suspenders with store.py).
+        "GLC_AUDIT_DB": "/data/glc/audit.sqlite",
+    })
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
 )
 
