@@ -12,6 +12,7 @@ from typing import Any
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
 
 
@@ -53,6 +54,7 @@ class Adapter(ChannelAdapter):
 
         session_id = raw.get("session_id")
         user_id = raw.get("user_id")
+        session_token = raw.get("session_token")
         user_handle = raw.get("user_handle", "unknown")
         text = raw.get("text")
         attachments = raw.get("attachments", [])
@@ -62,8 +64,19 @@ class Adapter(ChannelAdapter):
         if not user_id or not text:
             return None
 
-        # Step 4: Determine trust level
-        trust_level = classify("webui", user_id)
+        # Step 4: Determine trust level. `user_id` alone is a bare,
+        # client-suppliable string with no session/credential binding it to
+        # the browser that actually completed pairing — trusting classify()
+        # on it directly would let anyone who learns/guesses a paired user_id
+        # (including the owner's) impersonate them with zero credentials.
+        # The pairing flow (glc/routes/control.py::pair_confirm) hands the
+        # real client an unguessable session_token the moment pairing
+        # completes; every subsequent frame must present it back. Invariant
+        # 2: check against the actual, authenticated user, not a self-report.
+        if get_pairing_store().verify_session("webui", user_id, session_token):
+            trust_level = classify("webui", user_id)
+        else:
+            trust_level = "untrusted"
 
         # Step 5: Convert client timestamp (milliseconds) to datetime
         if client_ts:

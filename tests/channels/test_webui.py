@@ -25,16 +25,19 @@ def mock():
 
 @pytest.fixture
 def pair_owner():
+    """Pairs OWNER_ID and yields the session_token the real pairing flow
+    would hand the browser client — see findings/webui-identity-spoof/: on_message()
+    now requires this token before trusting a self-declared user_id."""
     store = get_pairing_store()
-    store.force_pair_owner("webui", OWNER_ID, user_handle="owner")
-    yield
+    rec = store.force_pair_owner("webui", OWNER_ID, user_handle="owner")
+    yield rec.session_token
     store.revoke("webui", OWNER_ID)
 
 
 @pytest.mark.asyncio
 async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
     adapter = Adapter(config={"mock": mock})
-    ev = mock.queue_owner_message("hello from owner")
+    ev = mock.queue_owner_message("hello from owner", session_token=pair_owner)
     msg = await adapter.on_message(ev)
     assert isinstance(msg, ChannelMessage)
     assert msg.channel == "webui"

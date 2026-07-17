@@ -72,6 +72,10 @@ async def pair_confirm(req: PairConfirmRequest, authorization: str | None = Head
         "user_handle": rec.user_handle,
         "trust_level": rec.trust_level,
         "paired_at": rec.paired_at,
+        # Channels whose inbound identity is a bare, client-suppliable
+        # string (webui) must present this on every subsequent message —
+        # see PairingStore.verify_session and findings/webui-identity-spoof/.
+        "session_token": rec.session_token,
     }
 
 

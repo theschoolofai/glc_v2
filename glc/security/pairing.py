@@ -10,6 +10,7 @@ The pairing store is sqlite-backed so it survives restarts.
 
 from __future__ import annotations
 
+import hmac
 import os
 import secrets
 import sqlite3
@@ -46,6 +47,14 @@ class PairingRecord:
     user_handle: str
     trust_level: str
     paired_at: float
+    # Unguessable, per-pairing secret minted the moment a pairing is created.
+    # Channels whose inbound identity is a bare, client-suppliable string
+    # (webui) must require the caller to present this alongside the id
+    # before trusting it — see PairingStore.verify_session and
+    # glc/channels/catalogue/webui/adapter.py. Channels whose identity is
+    # already authenticated another way (a verified webhook signature, a
+    # platform-issued sender id) have no need for it.
+    session_token: str = ""
 
 
 class PairingStore:
@@ -62,9 +71,15 @@ class PairingStore:
                     user_handle TEXT,
                     trust_level TEXT NOT NULL,
                     paired_at REAL NOT NULL,
+                    session_token TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (channel, channel_user_id)
                 )"""
             )
+            # Additive migration for any pre-existing pairings.sqlite created
+            # before this column existed.
+            existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(pairings)").fetchall()}
+            if "session_token" not in existing_cols:
+                c.execute("ALTER TABLE pairings ADD COLUMN session_token TEXT NOT NULL DEFAULT ''")
             c.execute(
                 """CREATE TABLE IF NOT EXISTS pending_codes (
                     code TEXT PRIMARY KEY,
@@ -107,16 +122,18 @@ class PairingStore:
                 c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
                 return None
             paired_at = time.time()
+            session_token = secrets.token_urlsafe(32)
             c.execute(
                 """INSERT OR REPLACE INTO pairings
-                   (channel, channel_user_id, user_handle, trust_level, paired_at)
-                   VALUES (?,?,?,?,?)""",
+                   (channel, channel_user_id, user_handle, trust_level, paired_at, session_token)
+                   VALUES (?,?,?,?,?,?)""",
                 (
                     row["channel"],
                     row["channel_user_id"],
                     row["user_handle"],
                     row["requested_trust_level"],
                     paired_at,
+                    session_token,
                 ),
             )
             c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
@@ -126,6 +143,7 @@ class PairingStore:
                 user_handle=row["user_handle"] or "",
                 trust_level=row["requested_trust_level"],
                 paired_at=paired_at,
+                session_token=session_token,
             )
 
     def lookup(self, channel: str, channel_user_id: str) -> PairingRecord | None:
@@ -142,7 +160,20 @@ class PairingStore:
                 user_handle=row["user_handle"] or "",
                 trust_level=row["trust_level"],
                 paired_at=float(row["paired_at"]),
+                session_token=row["session_token"] or "",
             )
+
+    def verify_session(self, channel: str, channel_user_id: str, session_token: str | None) -> bool:
+        """True only if `session_token` matches the secret minted for this
+        pairing when it was created. Used by channels (webui) whose inbound
+        identity is a bare, client-suppliable string that must not be trusted
+        on its own — see glc/channels/catalogue/webui/adapter.py."""
+        if not session_token:
+            return False
+        rec = self.lookup(channel, channel_user_id)
+        if rec is None or not rec.session_token:
+            return False
+        return hmac.compare_digest(session_token, rec.session_token)
 
     def owners(self, channel: str | None = None) -> list[PairingRecord]:
         q = "SELECT * FROM pairings WHERE trust_level='owner_paired'"
@@ -158,6 +189,7 @@ class PairingStore:
                     user_handle=r["user_handle"] or "",
                     trust_level=r["trust_level"],
                     paired_at=float(r["paired_at"]),
+                    session_token=r["session_token"] or "",
                 )
                 for r in c.execute(q, args).fetchall()
             ]
@@ -172,6 +204,7 @@ class PairingStore:
                     user_handle=r["user_handle"] or "",
                     trust_level=r["trust_level"],
                     paired_at=float(r["paired_at"]),
+                    session_token=r["session_token"] or "",
                 )
                 for r in rows
             ]
@@ -191,12 +224,13 @@ class PairingStore:
         installer to bootstrap the first owner identity. Not exposed
         through HTTP."""
         paired_at = time.time()
+        session_token = secrets.token_urlsafe(32)
         with _conn() as c:
             c.execute(
                 """INSERT OR REPLACE INTO pairings
-                   (channel, channel_user_id, user_handle, trust_level, paired_at)
-                   VALUES (?,?,?,?,?)""",
-                (channel, channel_user_id, user_handle, "owner_paired", paired_at),
+                   (channel, channel_user_id, user_handle, trust_level, paired_at, session_token)
+                   VALUES (?,?,?,?,?,?)""",
+                (channel, channel_user_id, user_handle, "owner_paired", paired_at, session_token),
             )
         return PairingRecord(
             channel=channel,
@@ -204,6 +238,7 @@ class PairingStore:
             user_handle=user_handle,
             trust_level="owner_paired",
             paired_at=paired_at,
+            session_token=session_token,
         )
 
 
