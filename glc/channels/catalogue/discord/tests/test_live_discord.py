@@ -22,16 +22,17 @@ Run with:
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
-from dotenv import load_dotenv
 
 from glc.channels.catalogue.discord.adapter import Adapter
 from glc.channels.catalogue.discord.tests.run_discord_bridge import RealDiscordClient
 from glc.channels.envelope import ChannelReply
+from glc.dev_env import load_only
 
-load_dotenv(Path(__file__).resolve().parents[5] / ".env")
+# Only this script's own vars -- not every gateway provider key that
+# happens to live in the same .env file. See glc/dev_env.py.
+load_only("DISCORD_BOT_TOKEN", "DISCORD_TEST_CHANNEL_ID", "DISCORD_TEST_USER_ID")
 
 BOT_TOKEN: str = os.environ.get("DISCORD_BOT_TOKEN", "")
 CHANNEL_ID: str = os.environ.get("DISCORD_TEST_CHANNEL_ID", "")

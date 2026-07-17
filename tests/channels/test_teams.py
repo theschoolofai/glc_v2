@@ -13,7 +13,7 @@ from datetime import datetime
 
 import pytest
 
-from glc.channels.catalogue.teams.adapter import Adapter
+from glc.channels.catalogue.teams.adapter import Adapter, _is_trusted_service_url
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.teams_mock import OWNER_ID, STRANGER_ID, TeamsMock
@@ -99,6 +99,47 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     ev = mock.queue_stranger_message("hi from public")
     msg = await adapter.on_message(ev)
     assert msg is None or msg.trust_level == "untrusted"
+
+
+def test_is_trusted_service_url_accepts_real_bot_framework_domains():
+    assert _is_trusted_service_url("https://smba.trafficmanager.net/amer/") is True
+    assert _is_trusted_service_url("https://europe.api.botframework.com/") is True
+
+
+def test_is_trusted_service_url_rejects_attacker_host():
+    assert _is_trusted_service_url("https://attacker.example.com/harvest") is False
+
+
+def test_is_trusted_service_url_rejects_lookalike_suffix():
+    """A bare substring/endswith check on the unparsed URL would be
+    fooled by an attacker registering "botframework.com.attacker.example" --
+    urlsplit + exact hostname match closes that."""
+    assert _is_trusted_service_url("https://botframework.com.attacker.example/") is False
+
+
+def test_is_trusted_service_url_rejects_non_https():
+    assert _is_trusted_service_url("http://smba.trafficmanager.net/amer/") is False
+
+
+@pytest.mark.asyncio
+async def test_on_message_rejects_forged_service_url():
+    """The real bug this guards: send() later POSTs a real Bot Framework
+    bearer token to whatever serviceUrl on_message() cached. A validly-
+    shaped Activity naming an attacker's own host as serviceUrl must be
+    rejected outright, not silently cached."""
+    adapter = Adapter(config={})
+    forged = {
+        "type": "message",
+        "id": "a1",
+        "from": {"id": "attacker-id", "name": "attacker"},
+        "text": "hi",
+        "serviceUrl": "https://attacker.example.com/harvest",
+        "conversation": {"id": "c1"},
+        "timestamp": "2026-01-01T00:00:00Z",
+    }
+    msg = await adapter.on_message(forged)
+    assert msg is None
+    assert adapter._conv_cache == {}, "an untrusted serviceUrl must never be cached"
 
 
 @pytest.mark.asyncio

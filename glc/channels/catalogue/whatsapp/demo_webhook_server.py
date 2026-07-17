@@ -22,13 +22,12 @@ the hub.challenge handshake).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-
-from dotenv import load_dotenv
 
 
 def _find_repo_root() -> Path:
@@ -38,7 +37,23 @@ def _find_repo_root() -> Path:
     raise RuntimeError("pyproject.toml not found — run from within the repo")
 
 
-load_dotenv(_find_repo_root() / ".env")
+from glc.dev_env import load_only  # noqa: E402
+
+# Only this script's own vars, plus what adapter.py needs (see the
+# module docstring above) -- not every gateway provider key that
+# happens to live in the same .env file. See glc/dev_env.py.
+load_only(
+    "WHATSAPP_APP_SECRET",
+    "WHATSAPP_VERIFY_TOKEN",
+    "WHATSAPP_PHONE_NUMBER_ID",
+    "WHATSAPP_TOKEN",
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "TWILIO_WHATSAPP_FROM",
+    "TWILIO_WEBHOOK_URL",
+    "WEBHOOK_PORT",
+    path=_find_repo_root() / ".env",
+)
 
 from glc.channels.catalogue.whatsapp.adapter import (  # noqa: E402
     verify_meta_signature,
@@ -101,7 +116,13 @@ class Handler(BaseHTTPRequestHandler):
         token = (params.get("hub.verify_token") or [""])[0]
         challenge = (params.get("hub.challenge") or [""])[0]
 
-        if mode == "subscribe" and token == VERIFY_TOKEN:
+        # docs/deploy_to_modal.md, "Round sixteen" fixed the identical
+        # bug class for the real install token (glc/routes/control.py):
+        # plain `==`/`!=` short-circuits at the first mismatched byte, a
+        # timing oracle. This script is meant to sit behind ngrok on a
+        # real public port per its own module docstring, so the same
+        # fix applies here for WHATSAPP_VERIFY_TOKEN.
+        if mode == "subscribe" and hmac.compare_digest(token, VERIFY_TOKEN):
             print(f"[demo] verify OK - challenge={challenge!r}")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")

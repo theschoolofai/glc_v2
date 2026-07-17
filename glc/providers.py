@@ -1163,19 +1163,19 @@ def build_providers(cache_store):
     - groq worker default: openai/gpt-oss-120b (was llama-3.3-70b-versatile, now moved to router pool)
     """
     out = {}
-    if k := os.getenv("GEMINI_API_KEY"):
+    if k := get_provider_key("GEMINI_API_KEY"):
         out["gemini"] = GeminiProvider(k, os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), cache_store)
-    if k := os.getenv("NVIDIA_API_KEY"):
+    if k := get_provider_key("NVIDIA_API_KEY"):
         out["nvidia"] = NvidiaProvider(k, os.getenv("NVIDIA_MODEL", "deepseek-ai/deepseek-v3.2"))
-    if k := os.getenv("GROQ_API_KEY"):
+    if k := get_provider_key("GROQ_API_KEY"):
         out["groq"] = GroqProvider(k, os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
-    if k := os.getenv("CEREBRAS_API_KEY"):
+    if k := get_provider_key("CEREBRAS_API_KEY"):
         out["cerebras"] = CerebrasProvider(k, os.getenv("CEREBRAS_MODEL", "zai-glm-4.7"))
-    if k := os.getenv("OPEN_ROUTER_API_KEY"):
+    if k := get_provider_key("OPEN_ROUTER_API_KEY"):
         out["openrouter"] = OpenRouterProvider(
             k, os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
         )
-    if k := os.getenv("GITHUB_ACCESS_TOKEN"):
+    if k := get_provider_key("GITHUB_ACCESS_TOKEN"):
         out["github"] = GitHubProvider(k, os.getenv("GITHUB_MODEL", "openai/gpt-4.1-mini"))
     if om := os.getenv("OLLAMA_MODEL"):
         out["ollama"] = OllamaProvider(om, os.getenv("OLLAMA_URL", "http://localhost:11434"))
@@ -1211,12 +1211,102 @@ def build_router_providers():
     we picked (Cerebras, Groq, NVIDIA, GitHub) all meter per-model, not per-key.
     """
     out = {}
-    if k := os.getenv("CEREBRAS_API_KEY"):
+    if k := get_provider_key("CEREBRAS_API_KEY"):
         out["cerebras"] = CerebrasProvider(k, os.getenv("ROUTER_CEREBRAS_MODEL", ROUTER_DEFAULTS["cerebras"]))
-    if k := os.getenv("GROQ_API_KEY"):
+    if k := get_provider_key("GROQ_API_KEY"):
         out["groq"] = GroqProvider(k, os.getenv("ROUTER_GROQ_MODEL", ROUTER_DEFAULTS["groq"]))
-    if k := os.getenv("NVIDIA_API_KEY"):
+    if k := get_provider_key("NVIDIA_API_KEY"):
         out["nvidia"] = NvidiaProvider(k, os.getenv("ROUTER_NVIDIA_MODEL", ROUTER_DEFAULTS["nvidia"]))
-    if k := os.getenv("GITHUB_ACCESS_TOKEN"):
+    if k := get_provider_key("GITHUB_ACCESS_TOKEN"):
         out["github"] = GitHubProvider(k, os.getenv("ROUTER_GITHUB_MODEL", ROUTER_DEFAULTS["github"]))
     return out
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Gateway/adapter trust boundary
+# ────────────────────────────────────────────────────────────────────────────
+# glc_v1 runs every channel adapter in the same interpreter as the gateway --
+# there is no OS process boundary between them, so `os.environ` is shared,
+# global, mutable state. "Adapters don't read provider keys" was, until now,
+# an assumption living only in code review: any adapter could satisfy it with
+# `os.environ["GEMINI_API_KEY"]`, the exact call it already uses to read its
+# own settings (e.g. TELEGRAM_BOT_TOKEN). Nothing raised, nothing hit the
+# audit log, and the reply the end user got back looked completely normal --
+# the theft was silent, and it wasn't limited to one provider: every key
+# listed below sits in the same environ dict, equally reachable.
+#
+# Some of these keys have more than one legitimate reader, and not all of
+# them run once at startup -- glc.voice.stt.providers.groq_whisper and
+# glc.voice.stt/tts.providers.gemini_live read GROQ_API_KEY / GEMINI_API_KEY
+# lazily, per request, long after the gateway has booted. Deleting the vars
+# from os.environ at startup would silence the adapter breach but also break
+# those legitimate lazy readers. So the fix has two parts:
+#
+#   1. snapshot_provider_key_env_vars() copies every key out of os.environ
+#      into a private, module-level dict the instant the process starts.
+#   2. scrub_provider_key_env_vars() then deletes them from os.environ.
+#   3. Every legitimate reader -- including the lazy ones -- goes through
+#      get_provider_key() instead of os.getenv()/os.environ[], so it keeps
+#      working off the snapshot.
+#
+# A caller that still does `os.environ["GEMINI_API_KEY"]` or
+# `os.getenv("GROQ_API_KEY")` directly -- the exact pattern the Telegram
+# breach used -- gets nothing once step 2 has run, loudly, instead of a
+# live secret, silently.
+GATEWAY_PROVIDER_KEY_ENV_VARS = (
+    "GEMINI_API_KEY",
+    "NVIDIA_API_KEY",
+    "GROQ_API_KEY",
+    "CEREBRAS_API_KEY",
+    "OPEN_ROUTER_API_KEY",
+    "GITHUB_ACCESS_TOKEN",
+)
+
+_provider_key_snapshot: dict[str, str] = {}
+
+
+def snapshot_provider_key_env_vars() -> None:
+    """Copy every gateway provider key out of os.environ into a private
+    cache. Call once, as the very first step of gateway startup -- before
+    build_providers(), before build_router_providers(), before anything
+    else has a chance to read these vars."""
+    for var in GATEWAY_PROVIDER_KEY_ENV_VARS:
+        val = os.getenv(var)
+        if val:
+            _provider_key_snapshot[var] = val
+
+
+def get_provider_key(var: str) -> str | None:
+    """The only sanctioned way for gateway/voice-provider code to read a
+    gateway provider key. Reads the private snapshot if one has been
+    taken (real startup); falls back to os.getenv (tests that construct a
+    provider directly, without going through gateway startup)."""
+    if var not in GATEWAY_PROVIDER_KEY_ENV_VARS:
+        raise ValueError(f"{var!r} is not a recognised gateway provider key")
+    if _provider_key_snapshot:
+        return _provider_key_snapshot.get(var)
+    return os.getenv(var)
+
+
+def scrub_provider_key_env_vars() -> None:
+    """Remove gateway provider keys from process env.
+
+    Call once, right after snapshot_provider_key_env_vars(), at the very
+    start of gateway startup -- before build_providers(),
+    build_router_providers(), embedders.build_embedders(), or any route/
+    adapter code runs. Every legitimate reader of these keys goes through
+    get_provider_key() (backed by the snapshot taken a moment earlier),
+    so nothing that's supposed to work stops working; anything that
+    reaches for os.environ/os.getenv directly -- the shape of the
+    Telegram adapter breach -- gets nothing.
+
+    This is not a real OS-level wall (that requires running adapters in
+    a separate process with its own environment); within one interpreter
+    any importable module-level state is reachable by anything else in
+    that interpreter, including _provider_key_snapshot itself. What it
+    does do is close the *specific* hole the breach exploited: reading
+    the key the same way every other env var is read. Silent theft
+    becomes a loud, test-visible failure.
+    """
+    for var in GATEWAY_PROVIDER_KEY_ENV_VARS:
+        os.environ.pop(var, None)

@@ -1,71 +1,150 @@
+"""Modal deployment entrypoint for glc_v2.
+
+Deploy: modal deploy modal_app.py
+Serve (hot-reload, ephemeral URL): modal serve modal_app.py
+
+Hardened to match the fixes carried over from the glc_v1 hardening pass
+(Sections 6/7 plus later STRIDE/tooling follow-ups) -- ported here
+alongside the rest of glc/, leak_runner/, and the exploit console. App
+name and Volume are deliberately distinct from glc_v1's own
+("glc-v2-gateway"/"glc-v2-config", not "glc-v1-*") so deploying this
+never collides with an already-running glc_v1 deployment under the same
+account. The Secret name (glc-llm-keys) is kept as glc_v2's own original
+name so an already-created Secret under this account still works
+without recreating it. `min_containers=0` is kept explicit, matching
+ASSIGNMENT.md's "one deployment per student, scale-to-zero, so you stay
+on the free tier."
+
+The FastAPI app itself (`glc.main:app`) is imported lazily, inside
+`fastapi_app()`, so this module only needs `modal` importable locally --
+everything glc actually depends on (fastapi, httpx, ...) is installed
+into the *remote* image via `uv_sync()`, not into whatever environment
+runs `modal deploy`.
+
+Secrets: create once with
+    modal secret create glc-llm-keys GEMINI_API_KEY=... NVIDIA_API_KEY=... \\
+        GROQ_API_KEY=... CEREBRAS_API_KEY=... OPEN_ROUTER_API_KEY=... \\
+        GITHUB_ACCESS_TOKEN=...
+Use mock keys only -- never put real provider keys on Modal for this
+assignment (see README.md).
+
+install_token lives wherever GLC_CONFIG_DIR points (glc/config.py,
+default ~/.glc). audit.sqlite, pairings.sqlite, gateway.sqlite, and
+replay.sqlite each resolve their own path from their own env var instead
+(GLC_AUDIT_DB/GLC_PAIRING_DB/GLC_GATEWAY_DB/GLC_REPLAY_DB -- all default
+to ~/.glc/<name>.sqlite independently of GLC_CONFIG_DIR, so redirecting
+GLC_CONFIG_DIR alone does *not* move them). All four are set explicitly
+below, pointed at the same Modal Volume (created on first deploy via
+create_if_missing) -- so every one of those files survives redeploys
+instead of resetting with the container's ephemeral filesystem.
+`max_containers=1` still bounds this to one writer at a time; the Volume
+doesn't make concurrent writers from multiple replicas safe, it just
+makes state durable across redeploys of the one replica that exists.
 """
-Modal deployment wrapper for glc_v1  (Session 12, Move 1: wrap the gateway).
 
-This file changes NO application code. It only describes, for Modal:
-  1. the container image to build,
-  2. a persistent Volume for the ~/.glc config/db folder,
-  3. a Secret that supplies the provider keys as environment variables,
-  4. which object to serve  ->  the existing FastAPI app, glc.main:app.
-
-Deploy with:   uv run modal deploy modal_app.py
-"""
-
-from pathlib import Path
+from __future__ import annotations
 
 import modal
 
-# The Modal "app" is just a namespace for everything we deploy under this name.
-app = modal.App("glc-v1-gateway")
+app = modal.App("glc-v2-gateway")
 
-# Path to the glc package next to this file. We copy the whole package (not just
-# .py files) so its data files travel too: policy.yaml, channels.yaml,
-# audit/schema.sql, and the channel catalogue.
-LOCAL_GLC = Path(__file__).parent / "glc"
+# docs/strides_testing.md's Supply-chain-compromise entry: "the base
+# image is not pinned to a digest and dependencies install by loose
+# version ranges, so either can shift under you." The dependency half
+# was already effectively closed: uv.lock is committed to git, and
+# Image.uv_sync()'s frozen=True default (confirmed via
+# `help(modal.Image.uv_sync)`) runs `uv sync --frozen`, which refuses to
+# deviate from the lock at build time. The base OS image was the real
+# gap: `debian_slim(python_version="3.12")` resolves to whatever Modal's
+# current slim variant is at build time, with no pin at all. Pinned to a
+# digest verified two ways before use (Docker Hub's registry API and a
+# local `docker pull` cross-check both returned the same digest for
+# python:3.12-slim-bookworm):
+#   docker pull python:3.12-slim-bookworm
+#   docker inspect python:3.12-slim-bookworm --format '{{.RepoDigests}}'
+_BASE_IMAGE = "python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b"
 
-# The image = a Linux box with Python 3.11, the same dependencies as
-# pyproject.toml, the glc package copied in, and GLC_CONFIG_DIR pointed at the
-# Volume mount so all databases land on persistent storage instead of the
-# throwaway container filesystem.
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "fastapi>=0.110",
-        "uvicorn[standard]>=0.27",
-        "httpx>=0.27",
-        "python-dotenv>=1.0",
-        "pydantic>=2.6",
-        "jsonschema>=4.21",
-        "pyyaml>=6.0",
-        "websockets>=12.0",
-        "twilio>=9.0",
+    modal.Image.from_registry(_BASE_IMAGE)
+    .uv_sync()
+    .add_local_dir(
+        "glc",
+        remote_path="/root/glc",
+        ignore=lambda p: p.name.startswith(".env") or p.name == "__pycache__",
     )
-    .env({"GLC_CONFIG_DIR": "/data/glc"})
-    .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
+    # Needed only so the *gateway's own running container* can later call
+    # modal.Sandbox.create(image=sandbox_image, ...) (glc/voice/sandbox.py)
+    # -- the SDK re-validates a uv_sync()-based image's dockerfile
+    # definition at the point it's used to build a new object, checking
+    # for ./pyproject.toml relative to *its* cwd. See
+    # docs/fix_security_breach.md, "Round eleven".
+    .add_local_file("pyproject.toml", remote_path="/root/pyproject.toml")
+    .add_local_file("uv.lock", remote_path="/root/uv.lock")
 )
 
-# A persistent Volume. The audit db, pairing db, and install token live here and
-# survive restarts and redeploys. Without this, every restart wipes them.
-data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
+# add_local_dir's default copy=False mounts glc/ into a Function's own
+# containers at startup -- it is *not* baked into the image layer, so a
+# Sandbox created from `image` (a separate container) does not have it.
+# copy=True bakes glc/ into an actual image layer instead, kept as a
+# second image scoped to Sandbox use only. See docs/fix_security_breach.md,
+# "Round eleven".
+sandbox_image = (
+    modal.Image.from_registry(_BASE_IMAGE)
+    .uv_sync()
+    .add_local_dir(
+        "glc",
+        remote_path="/root/glc",
+        ignore=lambda p: p.name.startswith(".env") or p.name == "__pycache__",
+        copy=True,
+    )
+)
 
-# The provider keys, injected as environment variables at runtime. Created
-# separately with `modal secret create glc-llm-keys ...` (mock values for now).
-llm_secret = modal.Secret.from_name("glc-llm-keys")
+CONFIG_MOUNT_PATH = "/vol/glc-config"
+config_volume = modal.Volume.from_name("glc-v2-config", create_if_missing=True)
+
+# GLC_CONFIG_DIR only redirects install_token/policy.yaml/channels.yaml.
+# audit.sqlite, pairings.sqlite, gateway.sqlite, and replay.sqlite each
+# need their own env var pointed at the same Volume, or they silently
+# stay on ephemeral container disk. replay.sqlite was missing from this
+# list for a real stretch of glc_v1's history (docs/advanced_issue_found.md)
+# -- WhatsApp's replay-guard dedup state quietly lived on local container
+# disk, reset by any cold start/redeploy. Setting it here is necessary
+# but not sufficient on its own -- see glc/channels/isolation.py's
+# _SAFE_STATE_VARS for the other half (the isolated adapter subprocess
+# boundary has to actually forward it).
+GATEWAY_ENV = {
+    "GLC_CONFIG_DIR": CONFIG_MOUNT_PATH,
+    "GLC_AUDIT_DB": f"{CONFIG_MOUNT_PATH}/audit.sqlite",
+    "GLC_PAIRING_DB": f"{CONFIG_MOUNT_PATH}/pairings.sqlite",
+    "GLC_GATEWAY_DB": f"{CONFIG_MOUNT_PATH}/gateway.sqlite",
+    "GLC_REPLAY_DB": f"{CONFIG_MOUNT_PATH}/replay.sqlite",
+    # This deployment is reachable from the public internet -- disable
+    # /docs, /redoc, /openapi.json (glc/main.py), which otherwise hand
+    # an attacker the full route map with zero auth.
+    "GLC_DISABLE_DOCS": "1",
+}
 
 
 @app.function(
     image=image,
-    volumes={"/data": data_volume},
-    secrets=[llm_secret],
-    min_containers=0,  # scale to zero when idle -> protects the free tier
+    secrets=[modal.Secret.from_name("glc-llm-keys")],
+    volumes={CONFIG_MOUNT_PATH: config_volume},
+    env=GATEWAY_ENV,
+    max_containers=1,
+    min_containers=0,  # scale to zero when idle -- ASSIGNMENT.md's free-tier requirement
+    timeout=120,
 )
 @modal.asgi_app()
 def fastapi_app():
-    """Serve the unchanged glc_v1 FastAPI app."""
-    import os
+    from glc.main import app as web_app
 
-    # The gateway writes its databases and install token here on startup, so the
-    # folder must exist on the mounted Volume before the app's lifespan runs.
-    os.makedirs("/data/glc", exist_ok=True)
+    # glc/ stays deployment-agnostic; this is the one place a Modal-
+    # specific reference is handed to it, so glc/voice/sandbox.py can
+    # spawn per-provider Sandboxes under this same App -- see
+    # docs/fix_security_breach.md, "Round eleven". Local dev/pytest
+    # construct glc.main.app directly and never set these, so they keep
+    # exercising the in-process provider call unchanged.
+    web_app.state.modal_app = app
+    web_app.state.modal_image = sandbox_image
 
-    from glc.main import app as web  # the real glc_v1 app, imported as-is
-    return web
+    return web_app

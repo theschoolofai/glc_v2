@@ -56,6 +56,7 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     monkeypatch.setenv("GLC_AUDIT_DB", str(tmp_path / "audit.sqlite"))
     monkeypatch.setenv("GLC_PAIRING_DB", str(tmp_path / "pairings.sqlite"))
     monkeypatch.setenv("GLC_GATEWAY_DB", str(tmp_path / "gateway.sqlite"))
+    monkeypatch.setenv("GLC_REPLAY_DB", str(tmp_path / "replay.sqlite"))
 
     import glc.config as _cfg
 

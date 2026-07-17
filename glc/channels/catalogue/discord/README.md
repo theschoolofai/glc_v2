@@ -1,49 +1,86 @@
-# Discord Gateway
+# Discord Gateway Adapter
 
-This is a **group assignment** in Session 11. Implement the discord adapter
-to make the test suite at `tests/channels/test_discord.py` pass.
+Slot `discord` (group **Discord**, chat `G2`). This module implements the Discord Gateway adapter for **Session 11 — GLC v1**.
 
-## What you build
+It translates real-time Discord messaging events (WebSockets and REST APIs) to and from the canonical gateway message envelopes, featuring automatic trust classification, allowlist gating in public channels, and user mention resolution.
 
-Two files under this directory:
+---
 
-- `adapter.py` — subclass `glc.channels.base.ChannelAdapter` and implement
-  `on_message(raw) -> ChannelMessage` and `send(reply) -> Any`.
-- `schemas.py` — any channel-specific Pydantic types you need.
+## Files in this Slot
 
-## Required environment variables
+* **`adapter.py`**: The core adapter implementation subclassing `ChannelAdapter`. Houses the `on_message` inbound event translator and the `send` outbound REST reply dispatcher.
+* **`schemas.py`**: Pydantic models mirroring the actual slices of the Discord WebSocket gateway payload and REST bodies (e.g. `DiscordUser`, `DiscordMessage`, `DiscordCreateMessage`).
+* **`help_docs/api_research.md`**: Architectural mapping of the Discord API payload parameters, REST endpoints, and required Authorization headers.
+* **`tests/run_discord_bridge.py`**: A live client bridge runner that connects to the Discord WebSocket Gateway and bridges messages to/from the local GLC Gateway server.
+* **`tests/send_test_message.py`**: A standalone test helper script to send test REST API messages directly to a target Discord channel.
+* **`tests/test_live_discord.py`**: Live integration tests (marked `requires_live_api`) that exercise the real Discord REST API; auto-skipped when credentials are absent.
 
-- `DISCORD_BOT_TOKEN`
+---
 
-## Free-tier limits
+## 1. Local Testing & Verification
 
-Free for any guild the bot is invited into. WebSocket gateway shard limits apply at scale.
+To verify the implementation locally, run the following quality gates from the repository root:
 
-## Wire-format quirks to expect
+### Automated Mock Contract Tests
+Run the 7-test suite to verify the adapter's structural and behavioral contracts (gated by mock injection):
+```bash
+uv run pytest tests/channels/test_discord.py -v
+```
 
-Discord delivers events over a heartbeated WebSocket gateway. Embeds and components are separate from `content`. Public channels require explicit mention to address the bot.
+### Live Integration Tests
+To run live integration tests against the real Discord API (these auto-skip if credentials are not configured in your `.env`):
+```bash
+uv run pytest glc/channels/catalogue/discord/tests/test_live_discord.py -m requires_live_api -v
+```
 
-## Tests you need to pass
 
-The failing tests live at `tests/channels/test_discord.py`. They cover:
+### Linter Compliance
+Verify style rules and formatting guidelines are met:
+```bash
+uv run ruff check glc/channels/catalogue/discord/
+```
 
-1. `on_message` builds a valid `ChannelMessage` for owner and stranger inputs.
-2. Trust level resolves to `owner_paired` / `user_paired` / `untrusted` correctly.
-3. `send` produces a valid wire-format payload and reaches the mock.
-4. The adapter handles forced disconnects without raising.
-5. Rate-limit responses propagate to the caller as a 429.
-6. In public channels with the default `mention_only_in_public: true`, the
-   adapter consults the allowlist before processing strangers.
+### Static Type Checking
+Verify type safety:
+```bash
+uv run mypy glc/channels/catalogue/discord/
+```
 
-The mock-API fake at `tests/channels/mocks/discord_mock.py` is your contract
-surface. Do **not** edit the mock or the test file — they are fixed.
+---
 
-## Submission
+## 2. Real-World Integration & Running the Bot
 
-Open a PR that:
+To test and run the adapter against the real Discord API end-to-end:
 
-- Adds your `adapter.py` and `schemas.py`.
-- Passes `pytest tests/channels/test_discord.py`.
-- Updates `CLAIMS.md` if you have not already claimed this channel.
+### Step A: Configure the Environment
+Copy the environment template `glc/channels/catalogue/discord/env.example` to `.env` at the repository root and fill in your credentials:
+```bash
+cp glc/channels/catalogue/discord/env.example .env
+```
 
-CI gates merge through branch protection. A TA reviews before merge.
+Your `.env` should define:
+* `DISCORD_BOT_TOKEN`: The bot token from the Discord Developer Portal.
+* `DISCORD_TEST_CHANNEL_ID`: A channel ID where the bot has send/read permissions.
+* `DISCORD_TEST_USER_ID` (optional): A user ID used to verify mention resolution.
+
+### Step B: Start the GLC Gateway Server
+Start the central GLC Gateway server on port `8111`:
+```bash
+uv run python -m glc.main
+```
+
+### Step C: Run the Discord WebSocket Bridge
+Start the external bridge process to connect to the Discord API:
+```bash
+uv run python -m glc.channels.catalogue.discord.tests.run_discord_bridge
+```
+
+The bridge will automatically log into Discord, listen for incoming channel messages, forward them to your local gateway, and post agent echoes back to your Discord channel.
+
+---
+
+## 3. Direct Outbound Test
+To test outgoing REST API messages directly without connecting the gateway:
+```bash
+uv run python -m glc.channels.catalogue.discord.tests.send_test_message
+```

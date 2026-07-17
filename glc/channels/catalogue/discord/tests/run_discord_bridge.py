@@ -10,19 +10,19 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path
 from typing import Any
 
 import httpx
 import websockets
-from dotenv import load_dotenv
 
 from glc.channels.catalogue.discord.adapter import Adapter
 from glc.channels.envelope import ChannelReply
 from glc.config import get_or_create_install_token
+from glc.dev_env import load_only
 
-# Load environment variables from .env at repository root
-load_dotenv(Path(__file__).resolve().parents[5] / ".env")
+# Only this script's own vars -- not every gateway provider key that
+# happens to live in the same .env file. See glc/dev_env.py.
+load_only("DISCORD_BOT_TOKEN", "GLC_PORT")
 
 
 class RealDiscordClient:
@@ -118,14 +118,17 @@ async def run_bridge():
     # 1. Retrieve the GLC local install token to authorize with the GLC gateway
     install_token = get_or_create_install_token()
     glc_port = os.environ.get("GLC_PORT", "8111")
-    glc_ws_url = f"ws://localhost:{glc_port}/v1/channels/discord?token={install_token}"
+    # Install token travels only as an Authorization header now, never as
+    # a ?token= query param (query strings land in access logs, proxy
+    # logs, and shell history).
+    glc_ws_url = f"ws://localhost:{glc_port}/v1/channels/discord"
 
     # 2. Instantiate client and adapter
     client = RealDiscordClient(token=bot_token)
     adapter = Adapter(config={"client": client})
 
     print("[bridge] connecting to local GLC gateway...")
-    async with websockets.connect(glc_ws_url) as glc_ws:
+    async with websockets.connect(glc_ws_url, additional_headers={"Authorization": f"Bearer {install_token}"}) as glc_ws:
         print("[bridge] connected to GLC gateway. Connecting to Discord WebSocket gateway...")
 
         # 3. Connect to Discord Gateway

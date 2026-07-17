@@ -18,11 +18,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from glc.channels.catalogue.line.adapter import Adapter, LineTransport
 from glc.channels.envelope import ChannelReply
+from glc.dev_env import load_only
 
 LINE_MESSAGE_API = "https://api.line.me/v2/bot/message"
 DEFAULT_AGENT_URL = "http://127.0.0.1:8200/agent/query"
@@ -48,7 +48,17 @@ class BridgeConfig:
 
     @classmethod
     def from_env(cls) -> BridgeConfig:
-        load_dotenv()
+        # Only this script's own vars -- not every gateway provider key
+        # that happens to live in the same .env file. See glc/dev_env.py.
+        load_only(
+            "LINE_CHANNEL_ACCESS_TOKEN",
+            "LINE_CHANNEL_SECRET",
+            "AGENT_URL",
+            "LINE_ACK_TEXT",
+            "LINE_NOT_PAIRED_TEXT",
+            "LINE_AGENT_UNAVAILABLE_TEXT",
+            "AGENT_TIMEOUT_S",
+        )
         return cls(
             access_token=os.getenv("LINE_CHANNEL_ACCESS_TOKEN"),
             channel_secret=os.getenv("LINE_CHANNEL_SECRET"),

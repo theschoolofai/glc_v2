@@ -25,18 +25,29 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
 from glc.channels.envelope import ChannelMessage
+from glc.dev_env import load_only
 from glc.security.pairing import get_pairing_store
 
 from .adapter import Adapter
 from .webhook import build_app, gateway_roundtrip
 
-load_dotenv(Path(__file__).resolve().parents[5] / ".env")  # matches glc/main.py's convention
+# Only this script's own vars (see the "Env:" list in the module
+# docstring above) -- not every gateway provider key that happens to
+# live in the same .env file. See glc/dev_env.py.
+load_only(
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "TWILIO_PHONE_NUMBER",
+    "TWILIO_OWNER_NUMBER",
+    "GLC_PUBLIC_BASE",
+    "GLC_TWILIO_WEBHOOK_PORT",
+    "GLC_GATEWAY_HOST",
+    "GLC_GATEWAY_PORT",
+    "GLC_TWILIO_SKIP_SIG",
+)
 
 # ─── ANSI colors ─────────────────────────────────────────────────────────────
 DIM = "\033[38;5;250m"

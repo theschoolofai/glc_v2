@@ -42,48 +42,55 @@ def test_new_s11_routes_are_registered(app_client):
         assert p in paths
 
 
-def test_v1_providers_shape_unchanged(app_client):
-    body = app_client.get("/v1/providers").json()
+def test_v1_providers_shape_unchanged(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    body = app_client.get("/v1/providers", headers=h).json()
     # V9 shape: order, providers, shortcuts, limits, models
     for k in ("order", "providers", "shortcuts", "limits", "models"):
         assert k in body
 
 
-def test_v1_status_shape_unchanged(app_client):
-    body = app_client.get("/v1/status").json()
+def test_v1_status_shape_unchanged(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    body = app_client.get("/v1/status", headers=h).json()
     for k in ("order", "live", "today", "limits"):
         assert k in body
 
 
-def test_v1_capabilities_returns_per_provider_caps(app_client):
-    body = app_client.get("/v1/capabilities").json()
+def test_v1_capabilities_returns_per_provider_caps(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    body = app_client.get("/v1/capabilities", headers=h).json()
     # Even with zero providers wired, the shape must be a dict.
     assert isinstance(body, dict)
 
 
-def test_v1_cost_by_agent_returns_dict(app_client):
-    body = app_client.get("/v1/cost/by_agent").json()
+def test_v1_cost_by_agent_returns_dict(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    body = app_client.get("/v1/cost/by_agent", headers=h).json()
     assert isinstance(body, dict)
 
 
-def test_chat_request_rejects_bad_provider(app_client):
-    r = app_client.post("/v1/chat", json={"prompt": "hi", "provider": "no_such_provider"})
+def test_chat_request_rejects_bad_provider(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    r = app_client.post("/v1/chat", json={"prompt": "hi", "provider": "no_such_provider"}, headers=h)
     # If no providers wired at all, the validation hits 400; if they are
     # wired, the candidate list is empty (also 400).
     assert r.status_code in (400, 503)
 
 
-def test_chat_request_minimal_body_validates(app_client):
+def test_chat_request_minimal_body_validates(app_client, install_token):
     """The request body schema accepts a bare prompt with no provider."""
     # We don't care about the upstream call result — just that Pydantic
     # accepts the body shape (i.e., not a 422).
-    r = app_client.post("/v1/chat", json={"prompt": "hi"})
+    h = {"Authorization": f"Bearer {install_token}"}
+    r = app_client.post("/v1/chat", json={"prompt": "hi"}, headers=h)
     assert r.status_code != 422
 
 
-def test_embed_request_413_on_oversize(app_client):
+def test_embed_request_413_on_oversize(app_client, install_token):
     huge = "x" * 9000
-    r = app_client.post("/v1/embed", json={"text": huge})
+    h = {"Authorization": f"Bearer {install_token}"}
+    r = app_client.post("/v1/embed", json={"text": huge}, headers=h)
     # 413 if embedders exist; 503 if none configured at all.
     assert r.status_code in (413, 503)
 

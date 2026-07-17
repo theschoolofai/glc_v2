@@ -71,3 +71,33 @@ def test_code_collision_replaces_pending():
     # the user shouldn't have to remember which old code is live).
     if code1 != code2:
         assert store.confirm_code(code2) is not None
+
+
+# ─────────── Trust-boundary: force_pair_owner() vs. an isolated adapter ───────────
+
+
+def test_force_pair_owner_raises_inside_adapter_sandbox(monkeypatch):
+    """docs/fix_security_breach.md, Round ten: a hostile channel
+    adapter's on_message, running inside glc.channels.isolation's
+    subprocess, must not be able to self-escalate to owner_paired via
+    force_pair_owner() even though it can reach the pairing DB file."""
+    monkeypatch.setenv("GLC_ADAPTER_SANDBOX", "1")
+    store = PairingStore()
+    try:
+        store.force_pair_owner("telegram", "attacker-id", user_handle="me")
+        raised = False
+    except PermissionError:
+        raised = True
+    assert raised
+    assert store.lookup("telegram", "attacker-id") is None
+
+
+def test_force_pair_owner_works_normally_outside_adapter_sandbox(monkeypatch):
+    """Regression: the installer/dev-bootstrap scripts (live_poll.py,
+    server.py, trust_setup.py, ...) and this file's own tests never run
+    inside isolation.derive_adapter_env()'s subprocess, so the sandbox
+    gate above must not affect them."""
+    monkeypatch.delenv("GLC_ADAPTER_SANDBOX", raising=False)
+    store = PairingStore()
+    rec = store.force_pair_owner("telegram", "owner-1")
+    assert rec.trust_level == "owner_paired"

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import ssl
 import time
 from typing import Any
@@ -156,7 +155,9 @@ class Provider(STTProvider):
         except ImportError as exc:  # pragma: no cover - dependency present
             raise STTError("the 'websockets' package is required", status=None) from exc
 
-        api_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY")
+        from glc.providers import get_provider_key
+
+        api_key = self.config.get("api_key") or get_provider_key("GEMINI_API_KEY")
         if not api_key:
             raise STTError("GEMINI_API_KEY is not set", status=None)
 

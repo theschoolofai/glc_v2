@@ -18,6 +18,7 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     monkeypatch.setenv("GLC_AUDIT_DB", str(tmp_path / "audit.sqlite"))
     monkeypatch.setenv("GLC_PAIRING_DB", str(tmp_path / "pairings.sqlite"))
     monkeypatch.setenv("GLC_GATEWAY_DB", str(tmp_path / "gateway.sqlite"))
+    monkeypatch.setenv("GLC_REPLAY_DB", str(tmp_path / "replay.sqlite"))
 
     # Reset singletons that cache config-dir at first access.
     import glc.config as _cfg
@@ -29,12 +30,16 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.security.rate_limits as _r
 
     _r._limiter = None
+    _r._data_plane_limiter = None
     import glc.policy.engine as _e
 
     _e._engine = None
     import glc.audit.store as _a
 
     _a._singleton = None
+    import glc.providers as _prov
+
+    _prov._provider_key_snapshot = {}
     yield
 
 

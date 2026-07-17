@@ -16,8 +16,10 @@ provider into `_TEST_PROVIDERS`.
 
 from __future__ import annotations
 
+import base64
 import importlib
 
+from glc.voice import sandbox
 from glc.voice.stt.base import STTError, STTProvider, TranscribeResult
 
 PREFER_TO_PROVIDER: dict[str, str] = {
@@ -53,7 +55,14 @@ def _load_provider(name: str) -> STTProvider:
     return cls()
 
 
-async def transcribe(audio: bytes, mime: str, prefer: str = "default") -> TranscribeResult:
+async def transcribe(
+    audio: bytes,
+    mime: str,
+    prefer: str = "default",
+    *,
+    modal_app=None,
+    modal_image=None,
+) -> TranscribeResult:
     if prefer not in PREFER_TO_PROVIDER:
         raise STTError(f"unknown prefer={prefer!r}. Pick one of: {list(PREFER_TO_PROVIDER)}")
     name = PREFER_TO_PROVIDER[prefer]
@@ -66,27 +75,52 @@ async def transcribe(audio: bytes, mime: str, prefer: str = "default") -> Transc
         # surfaces a clear pointer at the WebSocket route instead of
         # a generic 501.
         try:
-            provider = _load_provider(name)
-            return await provider.transcribe(audio, mime)
-        except (NotImplementedError, STTError) as e:
+            return await _dispatch(name, audio, mime, modal_app, modal_image)
+        except (NotImplementedError, STTError, sandbox.SandboxProcessError) as e:
             raise STTError(
                 "streaming STT is not exposed through POST /v1/transcribe. "
                 "Open a Gemini Live WebSocket session (S12 deliverable). "
                 f"Underlying: {e}"
             ) from e
+    return await _safe_transcribe(name, audio, mime, modal_app, modal_image)
+
+
+async def _dispatch(
+    name: str, audio: bytes, mime: str, modal_app, modal_image
+) -> TranscribeResult:
+    """Sandboxed dispatch when a real modal_app/modal_image are supplied
+    and this provider is registered in glc.voice.sandbox.SANDBOX_SPEC
+    (see docs/fix_security_breach.md, "Round eleven") -- otherwise the
+    plain in-process call, unchanged from before this round. Local dev
+    and the test suite never pass modal_app/modal_image, so they always
+    take this second path."""
+    if modal_app is not None and modal_image is not None and sandbox.is_sandboxable("stt", name):
+        result = await sandbox.run_in_sandbox(
+            modal_app,
+            modal_image,
+            "stt",
+            name,
+            "transcribe",
+            {"audio_b64": base64.b64encode(audio).decode("ascii"), "mime": mime},
+        )
+        return TranscribeResult(**result)
     provider = _load_provider(name)
-    return await _safe_transcribe(provider, audio, mime, name)
+    return await provider.transcribe(audio, mime)
 
 
-async def _safe_transcribe(provider: STTProvider, audio: bytes, mime: str, name: str) -> TranscribeResult:
+async def _safe_transcribe(
+    name: str, audio: bytes, mime: str, modal_app, modal_image
+) -> TranscribeResult:
     try:
-        return await provider.transcribe(audio, mime)
+        return await _dispatch(name, audio, mime, modal_app, modal_image)
     except NotImplementedError as e:
         raise STTError(
             f"STT provider '{name}' is a stub (group assignment not yet merged). "
             f"Try a different `prefer=`. ({e})",
             status=501,
         ) from e
+    except sandbox.SandboxProcessError as e:
+        raise STTError(f"STT provider '{name}' failed in its sandbox: {e}", status=502) from e
 
 
 def register_test_provider(name: str, provider: STTProvider | None) -> None:
