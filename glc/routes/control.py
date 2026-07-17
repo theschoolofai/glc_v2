@@ -15,24 +15,34 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from glc.config import get_or_create_install_token
+from glc.security.auth import get_admin_token
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
+from glc.security.settings import get_settings
 
 router = APIRouter()
 
 
 def _require_token(authorization: str | None) -> None:
-    expected = get_or_create_install_token()
+    # The control plane accepts ONLY the admin/control token (the install
+    # token). Channel adapters authenticate with a separate adapter secret
+    # (see routes/channels.py), so they cannot reach this plane (Leak 1 / 4).
+    expected = get_admin_token() or get_or_create_install_token()
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
+        raise HTTPException(401, "missing bearer token (Authorization: Bearer <admin_token>)")
     presented = authorization.removeprefix("Bearer ").strip()
     if presented != expected:
-        raise HTTPException(403, "install token mismatch")
+        raise HTTPException(403, "admin token mismatch")
 
 
 class PairRequest(BaseModel):
     channel: str
     channel_user_id: str
     user_handle: str = ""
+    # An API caller may only request a *user_paired* pairing. Owner pairing is
+    # a privileged, out-of-band operation performed by the installer via
+    # PairingStore.force_pair_owner — it is intentionally NOT exposed over HTTP
+    # to prevent an adapter (which holds only the adapter secret) from granting
+    # itself owner_paired escalation (Leak 3).
     trust_level: str = "user_paired"
 
 
@@ -49,8 +59,14 @@ class PairConfirmRequest(BaseModel):
 @router.post("/v1/control/pair", response_model=PairResponse)
 async def pair(req: PairRequest, authorization: str | None = Header(default=None)):
     _require_token(authorization)
-    if req.trust_level not in ("user_paired", "owner_paired"):
-        raise HTTPException(400, f"trust_level must be user_paired or owner_paired, got {req.trust_level!r}")
+    # Leak 3: refuse any attempt to bootstrap an owner_paired identity through
+    # the public control API. Only 'user_paired' may be requested here.
+    if req.trust_level != "user_paired":
+        raise HTTPException(
+            400,
+            f"trust_level must be 'user_paired' via the API; got {req.trust_level!r}. "
+            "owner_paired is provisioned out-of-band by the installer.",
+        )
     code, expires_at = get_pairing_store().issue_code(
         req.channel,
         req.channel_user_id,
@@ -98,9 +114,18 @@ async def presence(request: Request, authorization: str | None = Header(default=
 
 @router.post("/v1/control/kill")
 async def kill(request: Request, authorization: str | None = Header(default=None)):
+    # Leak 8: this endpoint is gated by the *admin* token (never the adapter
+    # secret), so a compromised channel adapter cannot terminate the gateway.
+    # It is additionally restricted to loopback unless an operator explicitly
+    # opts in via GLC_KILL_ALLOW_REMOTE. The production target is PID isolation:
+    # adapters run in a separate Modal Sandbox and cannot signal this process.
     _require_token(authorization)
     client_host = request.client.host if request.client else "unknown"
-    if os.getenv("GLC_KILL_ALLOW_REMOTE") != "1" and client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not get_settings().kill_allow_remote and client_host not in (
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    ):
         raise HTTPException(
             403,
             f"kill is restricted to loopback (got {client_host}). "

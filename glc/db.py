@@ -9,11 +9,17 @@ separate append-only store under glc/audit/store.py.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+
+from glc.security.ledger import get_ledger
+from glc.security.secrets import redact_secrets
+
+log = logging.getLogger("glc.db")
 
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 DB_PATH = os.getenv("GLC_GATEWAY_DB", str(DEFAULT_DIR / "gateway.sqlite"))
@@ -23,11 +29,26 @@ def _ensure_parent() -> None:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 
+def _migrate(c) -> None:
+    """Idempotently add the integrity-signature column (Leak 10).
+
+    Every accounting row is signed with the gateway-only ledger key so forged
+    ledger entries are detectable on read. Adding the optional column is
+    backward compatible and does not change call behaviour."""
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(calls)").fetchall()}
+    if "row_sig" not in cols:
+        c.execute("ALTER TABLE calls ADD COLUMN row_sig TEXT")
+
+
 @contextmanager
 def conn():
     _ensure_parent()
-    c = sqlite3.connect(DB_PATH)
+    # WAL + busy_timeout: safe for concurrent async writers; a contended write
+    # waits rather than raising "database is locked" (SQLite concurrency risk).
+    c = sqlite3.connect(DB_PATH, timeout=10)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=5000")
     try:
         yield c
         c.commit()
@@ -70,6 +91,7 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_role_ts ON calls(call_role, ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_ts ON calls(agent, ts DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_session_ts ON calls(session, ts DESC)")
+        _migrate(c)
 
 
 def log_call(
@@ -96,6 +118,20 @@ def log_call(
     session=None,
     retries=0,
 ) -> None:
+    # Information disclosure: never persist secret-shaped text (provider keys,
+    # tokens) in the ledger. Redact before storing.
+    if error:
+        error = redact_secrets(str(error))
+    # Leak 10: sign the accounting row with the gateway-only ledger key so a
+    # forged ledger entry (written by any other process that can touch the
+    # sqlite file) is detectable on read.
+    row_sig = get_ledger().sign_call(
+        provider=str(provider),
+        model=str(model),
+        status=str(status),
+        prompt_chars=str(prompt_chars),
+        response_chars=str(response_chars),
+    )
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,
@@ -103,8 +139,8 @@ def log_call(
                                   latency_ms, status, error, prompt_chars, response_chars,
                                   override, attempted, tool_calls, reasoning_applied, tool_dialect,
                                   call_role, router_decision, embed_dim,
-                                  agent, session, retries)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  agent, session, retries, row_sig)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 time.time(),
                 provider,
@@ -129,6 +165,7 @@ def log_call(
                 agent,
                 session,
                 retries,
+                row_sig,
             ),
         )
 
@@ -154,7 +191,7 @@ def by_agent(session=None, since=None):
         rows = c.execute(q, args).fetchall()
         out: dict[str, list[dict]] = {}
         for r in rows:
-            out.setdefault(r["agent"], []).append(dict(r))
+            out.setdefault(r["agent"], []).append(_verify(r))
         return out
 
 
@@ -172,7 +209,23 @@ def recent(limit=100, provider=None, status=None):
     q += " ORDER BY ts DESC LIMIT ?"
     args.append(limit)
     with conn() as c:
-        return [dict(r) for r in c.execute(q, args).fetchall()]
+        return [_verify(row) for row in c.execute(q, args).fetchall()]
+
+
+def _verify(row) -> dict:
+    r = dict(row)
+    canon = (
+        str(r.get("provider")),
+        str(r.get("model")),
+        str(r.get("status")),
+        str(r.get("prompt_chars")),
+        str(r.get("response_chars")),
+    )
+    sig_ok = get_ledger().verify_call(canonical_parts=canon, signature=r.get("row_sig"))
+    if not sig_ok:
+        log.warning("ledger tamper detected: id=%s provider=%s", r.get("id"), r.get("provider"))
+    r["tampered"] = not sig_ok
+    return r
 
 
 def aggregate(call_role=None):

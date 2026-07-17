@@ -288,22 +288,30 @@ def _required_caps(req: ChatRequest):
 async def _resolve_image_urls(messages):
     import base64
 
-    import httpx as _httpx
+    from glc.security.outbound import EgressDenied, safe_outbound_client
+    from glc.security.ssrf import is_safe_outbound_url
 
     async def _fetch_to_data_url(url: str) -> str:
+        # SSRF guard (Leak 6): never fetch a URL that resolves to a private,
+        # loopback, link-local or cloud-metadata address. Redirects are not
+        # followed so a 302 cannot pivot to an internal host.
+        if not is_safe_outbound_url(url):
+            raise HTTPException(400, f"image url is not an allowed public endpoint: {url!r}")
         headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
+            "User-Agent": "Mozilla/5.0 (compatible; GLCv2/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
+        try:
+            async with safe_outbound_client(timeout=30) as c:
+                r = await c.get(url, headers=headers, follow_redirects=False)
                 r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        except EgressDenied as e:
+            raise HTTPException(400, f"egress denied: {e}")
+        except Exception as e:  # noqa: BLE001 - normalise to a safe client error
+            raise HTTPException(400, f"failed to fetch image url {url!r}")
+        mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+        b64 = base64.b64encode(r.content).decode()
+        return f"data:{mt};base64,{b64}"
 
     out = []
     for m in messages:
