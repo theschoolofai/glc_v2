@@ -72,6 +72,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 owner_ids=owners,
                 is_public_channel=bool(env.metadata.get("is_public_channel", False)),
                 was_mentioned=bool(env.metadata.get("was_mentioned", False)),
+                text=env.text,
             )
             if not ok:
                 audit_append(
@@ -155,6 +156,7 @@ async def channel_webhook(name: str, request: Request):
         owner_ids=owners,
         is_public_channel=bool(msg.metadata.get("is_public_channel", False)),
         was_mentioned=bool(msg.metadata.get("was_mentioned", False)),
+        text=msg.text,
     )
     if not ok:
         audit_append(
