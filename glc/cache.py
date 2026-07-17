@@ -15,7 +15,16 @@ import httpx
 
 
 class GeminiCache:
-    """Maps SHA-256(system_text) -> (cache_resource_name, expires_at)."""
+    """Maps SHA-256(api_key || model || system_text) -> (cache_resource_name,
+    expires_at).
+
+    Part 2 fix (invariant 5): the cache key includes the API key. A
+    cachedContents/<id> resource is minted inside the Google project that owns
+    the credential, so it is only valid for that credential. Keying on
+    (model, text) alone let a second tenant/credential reuse another tenant's
+    cache handle -- a cross-tenant provenance and billing leak. Binding the
+    key to the credential keeps each tenant's cached content separate.
+    """
 
     def __init__(self, ttl_seconds: int = 300):
         self.ttl = ttl_seconds
@@ -23,8 +32,12 @@ class GeminiCache:
         self._lock = asyncio.Lock()
 
     @staticmethod
-    def _key(model: str, text: str) -> str:
+    def _key(api_key: str, model: str, text: str) -> str:
         h = hashlib.sha256()
+        # Bind the entry to the owning credential. Hash the key (never store or
+        # log it in the clear) so co-tenants cannot share handles.
+        h.update(hashlib.sha256(api_key.encode()).digest())
+        h.update(b"\x00")
         h.update(model.encode())
         h.update(b"\x00")
         h.update(text.encode())
@@ -36,7 +49,7 @@ class GeminiCache:
         """Returns (cache_resource_name|None, cache_creation_input_tokens).
         cache_creation_input_tokens is non-zero only when we mint a fresh entry.
         """
-        key = self._key(model, text)
+        key = self._key(api_key, model, text)
         now = time.time()
         async with self._lock:
             if key in self._store:
