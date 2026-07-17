@@ -73,6 +73,10 @@ class Adapter(ChannelAdapter):
         # is registered on its `start` frame and evicted on `stop`.
         self._stream_callers: dict[str, dict[str, str]] = {}
 
+        # Hard limit on concurrent streams to prevent unbounded memory growth
+        # from attacks that send 'start' frames without matching 'stop' frames
+        self._max_streams: int = int(self.config.get("max_streams", 1000))
+
         # Optional buffered transcription (opt-in; default off keeps the
         # per-frame behaviour the official tests assert). When enabled, media
         # frames accumulate per stream and are transcribed once as a whole
@@ -252,6 +256,19 @@ class Adapter(ChannelAdapter):
         params = frame.start.customParameters
         caller = params.get("caller", "")
         handle = params.get("handle") or caller
+
+        # Enforce hard limit: evict oldest stream if at capacity
+        # Prevents unbounded memory growth from malicious 'start' spam
+        if len(self._stream_callers) >= self._max_streams:
+            oldest_sid = next(iter(self._stream_callers))
+            self._stream_callers.pop(oldest_sid)
+            self._stream_buffers.pop(oldest_sid, None)
+            logger.warning(
+                "twilio_voice: max_streams limit reached (%d), evicted oldest stream %s",
+                self._max_streams,
+                oldest_sid,
+            )
+
         self._stream_callers[frame.start.streamSid] = {"id": caller, "handle": handle}
         return ChannelMessage(
             channel=self.name,
