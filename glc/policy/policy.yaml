@@ -5,6 +5,7 @@
 # Match semantics:
 #   - tool / channel / trust_level: "*" matches anything; otherwise literal
 #   - condition.path_glob:    fnmatch glob against the tool's `path` param
+#                             (~ expanded; separators normalized)
 #   - condition.command_matches: substring match against `command` param;
 #                                accepts a list of patterns (any-match)
 #   - condition.recipient_type:  literal match against the param

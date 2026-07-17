@@ -14,6 +14,7 @@ config and logs a warning so the gateway boots in a known-safe state.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import threading
 from pathlib import Path
@@ -35,9 +36,17 @@ _SAFE_DEFAULT = PolicyConfig(
 )
 
 
+def _normalize_path_for_glob(s: str) -> str:
+    """Expand ``~`` and normalize separators so ``~/Documents/**`` matches
+    the equivalent absolute path on the host."""
+    return os.path.expanduser(s).replace("\\", "/")
+
+
 def _matches_glob(value: Any, pattern: str) -> bool:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not isinstance(pattern, str):
         return False
+    value = _normalize_path_for_glob(value)
+    pattern = _normalize_path_for_glob(pattern)
     # fnmatch's ** support is weak; substitute ** for a regex-ish pattern.
     if "**" in pattern:
         regex = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", "[^/]*")

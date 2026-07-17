@@ -83,6 +83,53 @@ def test_glob_does_not_match_other_paths():
     assert v.action == "allow"
 
 
+def test_path_glob_matches_expanded_home_documents():
+    """Absolute paths under the real home Documents dir must hit ~/Documents/**.
+
+    Without expanduser, only the literal ``~/...`` string form is denied and
+    ``Path.home()/Documents/...`` default-allows for owner_paired.
+    """
+    from pathlib import Path
+
+    eng = _engine(
+        [
+            PolicyRule(
+                tool="file.delete",
+                condition={"path_glob": "~/Documents/**"},
+                action="deny",
+                reason="docs are protected",
+            ),
+        ]
+    )
+    ctx = {"channel": "x", "trust_level": "owner_paired"}
+    abs_docs = str(Path.home() / "Documents" / "secrets" / "keys.txt")
+    v = eng.evaluate(
+        {"name": "file.delete", "arguments": {"path": abs_docs}},
+        ctx,
+    )
+    assert v.action == "deny"
+    # tilde form still denied
+    v2 = eng.evaluate(
+        {"name": "file.delete", "arguments": {"path": "~/Documents/secrets/keys.txt"}},
+        ctx,
+    )
+    assert v2.action == "deny"
+
+
+def test_packaged_policy_denies_absolute_documents_delete():
+    from pathlib import Path
+
+    from glc.config import PACKAGED_POLICY
+
+    eng = PolicyEngine.from_yaml(PACKAGED_POLICY)
+    abs_path = str(Path.home() / "Documents" / "x.txt")
+    v = eng.evaluate(
+        {"name": "file.delete", "arguments": {"path": abs_path}},
+        {"channel": "telegram", "trust_level": "owner_paired"},
+    )
+    assert v.action == "deny"
+
+
 def test_command_matches_list():
     eng = _engine(
         [
