@@ -77,7 +77,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 audit_append(
                     channel=env.channel,
                     channel_user_id=env.channel_user_id,
-                    trust_level=env.trust_level,
+                    trust_level="untrusted",
                     event_type="allowlist_drop",
                     result={"reason": why},
                 )
@@ -89,24 +89,41 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 audit_append(
                     channel=env.channel,
                     channel_user_id=env.channel_user_id,
-                    trust_level=env.trust_level,
+                    trust_level="untrusted",
                     event_type="rate_limit",
                     result={"reason": why},
                 )
                 await websocket.send_text(json.dumps({"status": 429, "error": why}))
                 continue
 
+            # Trust-level injection fix (Invariant 2): look up the canonical
+            # trust level from the pairing store rather than accepting the
+            # adapter's self-reported value. An adapter can forge any string
+            # in env.trust_level; the pairing store is the authoritative source.
+            pairing_rec = pairings.lookup(env.channel, env.channel_user_id)
+            canonical_trust = pairing_rec.trust_level if pairing_rec else "untrusted"
+
+            if env.trust_level != canonical_trust:
+                audit_append(
+                    channel=env.channel,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=canonical_trust,
+                    event_type="trust_level_spoof_attempt",
+                    result={"claimed": env.trust_level, "actual": canonical_trust},
+                )
+
             audit_append(
                 channel=env.channel,
                 channel_user_id=env.channel_user_id,
-                trust_level=env.trust_level,
+                trust_level=canonical_trust,
                 event_type="inbound_message",
                 params={"text": env.text, "thread_id": env.thread_id},
             )
 
             # S11 stub agent: echo the text back so adapter authors can
             # verify the wire end-to-end. The real agent runtime hooks
-            # in here in subsequent sessions.
+            # in here in subsequent sessions, using canonical_trust (not
+            # env.trust_level) for any policy or tool-access decisions.
             reply = ChannelReply(
                 channel=env.channel,
                 channel_user_id=env.channel_user_id,
