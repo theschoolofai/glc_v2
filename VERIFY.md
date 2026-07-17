@@ -342,3 +342,50 @@ uv run mypy glc
 - [x] `VERIFY.md` contains every command
 - [x] Repository remains deployable; Gemini key kept in Modal Secret (not code)
 - [x] No forced breaking API changes; no hardcoded secrets
+
+---
+
+## 25. New Bug (Part 2): Unauthenticated channel webhook ingestion (NB1)
+
+The `POST /v1/channels/{name}/webhook` route had no authentication and skipped the
+envelope guard, so an anonymous caller could inject channel messages (optionally with a
+spoofed `trust_level`), bypassing the Leak 9 control on a transport the session never
+catalogued. This violates the invariant: *the gateway is the authority on identity; channel
+ingestion is authenticated (least privilege, fail-secure).*
+
+### Reproduction (fresh checkout)
+```bash
+uv sync
+export GLC_CONFIG_DIR="$(mktemp -d)"
+uv run python - <<'PY'
+from fastapi.testclient import TestClient
+import glc.main as m
+with TestClient(m.app) as c:
+    # Anonymous POST — no adapter secret, no signature.
+    r = c.post("/v1/channels/webui/webhook",
+               json={"type":"user_message","session_id":"s","user_id":"attacker-999",
+                     "user_handle":"x","text":"hi","attachments":[],"client_ts":1700000000000})
+    print("status:", r.status_code, "| body:", r.json())
+    # Vulnerable build -> 200 {"status":"ok"} (message ingested, unauthenticated)
+PY
+```
+
+### Fix verification (regression suite)
+```bash
+uv run pytest tests/security/test_channel_webhook_auth.py -q
+```
+Expected: PASS — anonymous POST → `401`; authenticated POST accepted; spoofed
+`owner_paired` claim audited as `spoof_attempt` and not ingested.
+
+### Live equivalent (after deploy)
+```bash
+# No adapter-secret header -> rejected
+curl -s -o /dev/null -w "%{http_code}\n" -X POST "$GLC_URL/v1/channels/webui/webhook" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"user_message","session_id":"s","user_id":"attacker-999","text":"hi","attachments":[]}'
+# With the adapter secret -> 200
+curl -s -o /dev/null -w "%{http_code}\n" -X POST "$GLC_URL/v1/channels/webui/webhook" \
+  -H "Authorization: Bearer $GLC_ADAPTER_SECRET" -H "Content-Type: application/json" \
+  -d '{"type":"user_message","session_id":"s","user_id":"someuser","text":"hi","attachments":[]}'
+```
+Expected: `401` (first), `200` (second).

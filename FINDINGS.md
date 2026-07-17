@@ -176,4 +176,30 @@ regression suite is `tests/security/test_findings.py`.
 | Leak 9 spoof | `owner_paired` accepted | rejected + audited |
 | Leak 10 ledger | forged row accepted | `tampered=True` |
 
+---
+
+## Part 2 — New bug (not in Session 12 §6/§7)
+
+### NB1 — Unauthenticated channel webhook ingestion (auth + envelope guard missing)
+- **Broken invariant:** *The gateway — not the channel transport — is the authority on
+  identity; channel ingestion is authenticated (least privilege, fail-secure).*
+- **STRIDE:** Spoofing / Elevation of Privilege. **Attacker:** anonymous network caller.
+- **Severity:** High.
+- **Root cause:** `POST /v1/channels/{name}/webhook` (`glc/routes/channels.py`) had
+  **no authentication** and did **not** call `guard_channel_message`. The WebSocket
+  plane (`_ws_authenticate` + `guard_channel_message`) was hardened, but this parallel
+  HTTP ingestion path was left open. Adapters such as `webui`/`local_mic` perform no
+  self-verification in `on_message`, so a caller fully controls `channel_user_id` and
+  (where the adapter passes a caller-asserted level) `trust_level` — bypassing the Leak 9
+  spoofing control on a route the session never catalogued. This is a defense-in-depth gap
+  (fail-open second plane).
+- **Fix (`glc/routes/channels.py`):** the webhook route now (a) requires the adapter
+  secret via the same `_authenticate_adapter` helper the WS plane uses (fail-closed when
+  no secret is provisioned) and (b) runs `guard_channel_message` before allowlist/audit,
+  so trust is re-derived from the pairing store and spoofed escalation is dropped +
+  audited (`spoof_attempt`) — identical to the WS path.
+- **Evidence:** `tests/security/test_channel_webhook_auth.py` — anonymous POST → `401`;
+  authenticated POST accepted; spoofed `owner_paired` claim → `spoof_attempt` audited and
+  not ingested.
+
 Full per-finding before/after commands are in `VERIFY.md`.

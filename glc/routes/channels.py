@@ -35,25 +35,39 @@ from glc.security.settings import get_settings
 router = APIRouter()
 
 
-def _ws_authenticate(websocket: WebSocket, token: str | None) -> bool:
+def _presented_secret(authorization: str | None, token: str | None) -> str | None:
+    """Extract the bearer credential from a header or (legacy, opt-in) query
+    param. Returns the presented secret or None."""
+    if authorization and authorization.startswith("Bearer "):
+        return authorization.removeprefix("Bearer ").strip()
+    if token and get_settings().ws_allow_query_token:
+        return token
+    return None
+
+
+def _authenticate_adapter(authorization: str | None, token: str | None) -> bool:
     """Leak 1 / 4: adapters prove possession of the *adapter secret*, which is
     distinct from the admin/control token and the gateway key. The legacy
     ``?token=`` query-param fallback is disabled by default because it leaks
-    the secret into proxy/server logs."""
+    the secret into proxy/server logs.
+
+    Used by BOTH ingestion planes (WebSocket and the HTTP webhook route) so the
+    boundary is consistent — a channel adapter must authenticate regardless of
+    transport. Fail-closed: if no adapter secret is provisioned, every adapter
+    is refused rather than falling back to a weaker credential.
+    """
     expected = get_adapter_secret()
     if not expected:
-        # Misconfiguration: no adapter secret provisioned. Refuse all adapters
-        # rather than falling back to a weaker credential.
         return False
-    header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
-    presented = None
-    if header_auth and header_auth.startswith("Bearer "):
-        presented = header_auth.removeprefix("Bearer ").strip()
-    elif token and get_settings().ws_allow_query_token:
-        presented = token
-    import hmac
-
+    presented = _presented_secret(authorization, token)
     return bool(presented) and hmac.compare_digest(presented, expected)
+
+
+def _ws_authenticate(websocket: WebSocket, token: str | None) -> bool:
+    return _authenticate_adapter(
+        websocket.headers.get("authorization") or websocket.headers.get("Authorization"),
+        token,
+    )
 
 
 @router.websocket("/v1/channels/{name}")
@@ -170,6 +184,21 @@ async def channel_webhook_verify(name: str, request: Request):
 
 @router.post("/v1/channels/{name}/webhook")
 async def channel_webhook(name: str, request: Request):
+    # New-bug fix: the HTTP webhook ingestion plane shared NONE of the WS
+    # plane's controls — no adapter-secret authentication and no envelope
+    # guard. An anonymous caller could inject channel messages (optionally
+    # with a spoofed trust_level) that were audit-logged and echoed back,
+    # bypassing the Leak 9 spoofing control on a transport the session never
+    # catalogued. We now apply the SAME boundary as the WS path: authenticate
+    # with the adapter secret, then re-derive trust via guard_channel_message.
+    authorization = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not _authenticate_adapter(authorization, request.query_params.get("token")):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing or invalid adapter secret",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         adapter = registry.instantiate(name)
     except KeyError:
@@ -181,6 +210,24 @@ async def channel_webhook(name: str, request: Request):
     }
     msg = await adapter.on_message(raw)
     if msg is None:
+        return {"status": "ok"}
+
+    # Leak 9 (consistent across planes): the gateway — not the adapter — is the
+    # authority on identity. Re-derive the trust level from the pairing store
+    # and reject any adapter-asserted escalation. Failed spoof attempts are
+    # audited and dropped.
+    guard = guard_channel_message(msg)
+    if guard.spoof_detected:
+        audit_append(
+            channel=msg.channel,
+            channel_user_id=msg.channel_user_id,
+            trust_level=guard.authoritative_trust,
+            event_type="spoof_attempt",
+            result={
+                "reason": guard.reason,
+                "claimed_trust_level": guard.claimed_trust,
+            },
+        )
         return {"status": "ok"}
 
     limiter = get_rate_limiter()
@@ -198,7 +245,7 @@ async def channel_webhook(name: str, request: Request):
         audit_append(
             channel=msg.channel,
             channel_user_id=msg.channel_user_id,
-            trust_level=msg.trust_level,
+            trust_level=guard.authoritative_trust,
             event_type="allowlist_drop",
             result={"reason": why},
         )
@@ -209,7 +256,7 @@ async def channel_webhook(name: str, request: Request):
         audit_append(
             channel=msg.channel,
             channel_user_id=msg.channel_user_id,
-            trust_level=msg.trust_level,
+            trust_level=guard.authoritative_trust,
             event_type="rate_limit",
             result={"reason": why},
         )
@@ -218,7 +265,7 @@ async def channel_webhook(name: str, request: Request):
     audit_append(
         channel=msg.channel,
         channel_user_id=msg.channel_user_id,
-        trust_level=msg.trust_level,
+        trust_level=guard.authoritative_trust,
         event_type="inbound_message",
         params={"text": msg.text, "thread_id": msg.thread_id, "provider": msg.metadata.get("provider")},
     )
