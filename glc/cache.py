@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import time
 
-import httpx
+from glc.security.outbound import safe_outbound_client
 
 
 class GeminiCache:
@@ -53,7 +53,7 @@ class GeminiCache:
             "ttl": f"{self.ttl}s",
         }
         try:
-            async with httpx.AsyncClient(timeout=60) as c:
+            async with safe_outbound_client(timeout=60) as c:
                 r = await c.post(url, json=body)
                 if r.status_code != 200:
                     return None, 0

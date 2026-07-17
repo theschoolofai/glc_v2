@@ -29,7 +29,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
+from glc.security.outbound import safe_outbound_client
 
 # ────────────────────────────────────────────────────────────────────────────
 # V9 multimodal helpers
@@ -411,7 +411,7 @@ class OpenAICompatProvider(BaseProvider):
         self._apply_response_format(body, response_format)
         reasoning_applied = self._apply_reasoning(body, reasoning, m)
 
-        async with httpx.AsyncClient(timeout=180) as c:
+        async with safe_outbound_client(timeout=180) as c:
             r = await c.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
             if r.status_code != 200:
                 # Some providers reject reasoning_effort or strict json_schema — retry without them.
@@ -521,7 +521,7 @@ class OpenAICompatProvider(BaseProvider):
                 body["tool_choice"] = tool_choice if isinstance(tool_choice, (str, dict)) else "auto"
         self._apply_response_format(body, response_format)
         self._apply_reasoning(body, reasoning, m)
-        async with httpx.AsyncClient(timeout=180) as c:
+        async with safe_outbound_client(timeout=180) as c:
             async with c.stream(
                 "POST", f"{self.base_url}/chat/completions", headers=self._headers(), json=body
             ) as r:
@@ -764,7 +764,7 @@ class GeminiProvider(BaseProvider):
                 reasoning_applied = True
 
         url = f"{self.base_url}/models/{m}:generateContent?key={self.api_key}"
-        async with httpx.AsyncClient(timeout=180) as c:
+        async with safe_outbound_client(timeout=180) as c:
             r = await c.post(url, json=body)
             if r.status_code != 200:
                 # Retry stripping thinkingConfig / cachedContent on 400.
@@ -1057,7 +1057,7 @@ class OllamaProvider(BaseProvider):
             elif rf.get("type") == "json_object":
                 body["format"] = "json"
 
-        async with httpx.AsyncClient(timeout=600) as c:
+        async with safe_outbound_client(timeout=600) as c:
             r = await c.post(f"{self.base_url}/api/chat", json=body)
             if r.status_code != 200:
                 raise ProviderError(f"ollama HTTP {r.status_code}: {r.text[:300]}", status=r.status_code)
