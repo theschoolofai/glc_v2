@@ -142,10 +142,21 @@ class Adapter(ChannelAdapter):
                 self._set_local_reply_token(parsed.user_id, parsed.reply_token)
 
         trust_level = classify(self.name, parsed.user_id)
-        if self.config.get("is_public_channel") and trust_level == "untrusted":
+        if self.config.get("is_public_channel"):
+            # Gate EVERY sender in a public channel, not just untrusted ones.
+            # The mention-only-in-public rule (and the allowlist) applies to
+            # owners and paired users too — an owner's message in a public group
+            # must contain a genuine mention before the agent acts on it. The
+            # sibling adapters (signal, discord, matrix, local_mic) all gate all
+            # senders with owner_ids; gating only `untrusted` let any paired
+            # sender bypass the mention/allowlist gate entirely.
+            from glc.security.pairing import get_pairing_store
+
+            owner_ids = [r.channel_user_id for r in get_pairing_store().owners(self.name)]
             ok, _ = allowed(
                 self.name,
                 parsed.user_id,
+                owner_ids=owner_ids,
                 is_public_channel=True,
                 was_mentioned=bool(self.config.get("was_mentioned", False)),
             )
