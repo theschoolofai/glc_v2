@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from glc.voice.budget import enforce_daily_budget
 from glc.voice.tts import TTSError, synthesize
 
 router = APIRouter()
+
+
+def _max_text_chars() -> int:
+    """Part 2 fix (invariant 8): cap TTS input length. Paid TTS bills per
+    character, so an unbounded body is a denial-of-wallet + memory vector."""
+    try:
+        return int(os.getenv("GLC_TTS_MAX_CHARS", "5000"))
+    except ValueError:
+        return 5000
 
 
 class SpeakRequest(BaseModel):
@@ -29,6 +40,10 @@ class SpeakResponse(BaseModel):
 
 @router.post("/v1/speak", response_model=SpeakResponse)
 async def speak_route(req: SpeakRequest):
+    cap = _max_text_chars()
+    if cap > 0 and len(req.text) > cap:
+        raise HTTPException(413, f"text too large: {len(req.text)} chars (max {cap})")
+    await enforce_daily_budget()
     try:
         r = await synthesize(req.text, voice_id=req.voice_id, prefer=req.prefer)
     except TTSError as e:
