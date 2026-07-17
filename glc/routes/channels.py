@@ -66,12 +66,22 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            # is_public_channel / was_mentioned are attacker-controllable on
+            # this ingress (see findings/metadata-spoof/) — was_mentioned
+            # is cross-checked against the actual text inside allowed() when
+            # the channel configures mention_markers; is_public_channel has
+            # no equivalent independent signal, so the raw claim is recorded
+            # below regardless of the verdict, closing the audit-blind-spot
+            # half of the gap even where the claim itself can't be verified.
+            claimed_is_public = bool(env.metadata.get("is_public_channel", False))
+            claimed_was_mentioned = bool(env.metadata.get("was_mentioned", False))
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
                 owner_ids=owners,
-                is_public_channel=bool(env.metadata.get("is_public_channel", False)),
-                was_mentioned=bool(env.metadata.get("was_mentioned", False)),
+                is_public_channel=claimed_is_public,
+                was_mentioned=claimed_was_mentioned,
+                message_text=env.text,
             )
             if not ok:
                 audit_append(
@@ -80,6 +90,10 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                     trust_level=env.trust_level,
                     event_type="allowlist_drop",
                     result={"reason": why},
+                    params={
+                        "is_public_channel_claimed": claimed_is_public,
+                        "was_mentioned_claimed": claimed_was_mentioned,
+                    },
                 )
                 await websocket.send_text(json.dumps({"error": f"dropped: {why}"}))
                 continue
@@ -101,7 +115,12 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 channel_user_id=env.channel_user_id,
                 trust_level=env.trust_level,
                 event_type="inbound_message",
-                params={"text": env.text, "thread_id": env.thread_id},
+                params={
+                    "text": env.text,
+                    "thread_id": env.thread_id,
+                    "is_public_channel_claimed": claimed_is_public,
+                    "was_mentioned_claimed": claimed_was_mentioned,
+                },
             )
 
             # S11 stub agent: echo the text back so adapter authors can
@@ -149,12 +168,19 @@ async def channel_webhook(name: str, request: Request):
     pairings = get_pairing_store()
     owners = [p.channel_user_id for p in pairings.owners(channel=name)]
 
+    # See the matching comment in channel_ws: is_public_channel has no
+    # gateway-side oracle, so the raw claim is recorded regardless of the
+    # verdict; was_mentioned is cross-checked against msg.text inside
+    # allowed() when the channel configures mention_markers.
+    claimed_is_public = bool(msg.metadata.get("is_public_channel", False))
+    claimed_was_mentioned = bool(msg.metadata.get("was_mentioned", False))
     ok, why = allowed(
         msg.channel,
         msg.channel_user_id,
         owner_ids=owners,
-        is_public_channel=bool(msg.metadata.get("is_public_channel", False)),
-        was_mentioned=bool(msg.metadata.get("was_mentioned", False)),
+        is_public_channel=claimed_is_public,
+        was_mentioned=claimed_was_mentioned,
+        message_text=msg.text,
     )
     if not ok:
         audit_append(
@@ -163,6 +189,10 @@ async def channel_webhook(name: str, request: Request):
             trust_level=msg.trust_level,
             event_type="allowlist_drop",
             result={"reason": why},
+            params={
+                "is_public_channel_claimed": claimed_is_public,
+                "was_mentioned_claimed": claimed_was_mentioned,
+            },
         )
         return {"status": "ok"}
 
@@ -182,7 +212,13 @@ async def channel_webhook(name: str, request: Request):
         channel_user_id=msg.channel_user_id,
         trust_level=msg.trust_level,
         event_type="inbound_message",
-        params={"text": msg.text, "thread_id": msg.thread_id, "provider": msg.metadata.get("provider")},
+        params={
+            "text": msg.text,
+            "thread_id": msg.thread_id,
+            "provider": msg.metadata.get("provider"),
+            "is_public_channel_claimed": claimed_is_public,
+            "was_mentioned_claimed": claimed_was_mentioned,
+        },
     )
 
     reply = ChannelReply(
