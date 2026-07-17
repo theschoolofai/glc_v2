@@ -100,8 +100,7 @@ def main() -> int:
         return 2
     if name_a != name_b and len(minted) == 2:
         print(
-            "\nHARDENED: each tenant minted and used its own cache handle; the "
-            "key is scoped per credential."
+            "\nHARDENED: each tenant minted and used its own cache handle; the key is scoped per credential."
         )
         return 0
     print("\nUNEXPECTED state; inspect manually.")
