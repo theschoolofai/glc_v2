@@ -36,6 +36,7 @@ from glc.llm_schemas import (
     VisionRequest,
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.agent_identity import resolve_billing_agent
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -365,6 +366,14 @@ async def chat(req: ChatRequest, request: Request):
     explicit_override = bool(req.provider)
     required_caps = _required_caps(req)
 
+    # Cost-attribution integrity: the ledger identity is resolved from a
+    # trusted source, not taken verbatim from the request body. A caller may
+    # bill as a registered agent only by proving that identity with its
+    # token; otherwise a claim to a registered agent is quarantined so it
+    # cannot forge that agent's spend. `req.agent` is still used as the
+    # (non-security) routing hint below.
+    billing_agent = resolve_billing_agent(request.headers.get("x-glc-agent-token"), req.agent)
+
     if req.agent and not req.provider:
         pinned = AGENT_ROUTING.get(req.agent)
         if pinned and pinned in rtr.providers:
@@ -452,7 +461,7 @@ async def chat(req: ChatRequest, request: Request):
                             response_chars=len(text),
                             override=req.provider,
                             attempted=_attempts_str(all_attempts),
-                            agent=req.agent,
+                            agent=billing_agent,
                             session=req.session,
                             retries=retries,
                         )
@@ -467,7 +476,7 @@ async def chat(req: ChatRequest, request: Request):
                             prompt_chars=len(prompt_text),
                             override=req.provider,
                             attempted=_attempts_str(all_attempts),
-                            agent=req.agent,
+                            agent=billing_agent,
                             session=req.session,
                             retries=retries,
                         )
@@ -560,7 +569,7 @@ async def chat(req: ChatRequest, request: Request):
                 tool_dialect=result["tool_call_dialect"],
                 call_role="worker",
                 router_decision=router_decision.tier if router_decision else None,
-                agent=req.agent,
+                agent=billing_agent,
                 session=req.session,
                 retries=retries,
             )
@@ -596,7 +605,7 @@ async def chat(req: ChatRequest, request: Request):
                 prompt_chars=len(prompt_text),
                 override=req.provider,
                 attempted=_attempts_str(all_attempts),
-                agent=req.agent,
+                agent=billing_agent,
                 session=req.session,
                 retries=retries,
             )
@@ -624,7 +633,7 @@ async def chat(req: ChatRequest, request: Request):
                 prompt_chars=len(prompt_text),
                 override=req.provider,
                 attempted=_attempts_str(all_attempts),
-                agent=req.agent,
+                agent=billing_agent,
                 session=req.session,
                 retries=retries,
             )
