@@ -68,6 +68,52 @@ def _skip_signature() -> bool:
     return os.environ.get("GLC_TWILIO_SKIP_SIG", "").lower() in {"1", "true", "yes"}
 
 
+# --- Artifact access control (Part 2 fix, invariants 2 & 5) ----------------
+# GET /artifacts/{sha} used to serve stored inbound MMS media to anyone with
+# the public URL, gated only by guessing a 16-hex hash. Private user content
+# must not be readable by an anonymous outsider. We require a short-lived
+# signed token so the gateway can still hand Twilio a fetchable MediaUrl while
+# anonymous/guessing callers are refused. Signing key = the install token.
+
+_ARTIFACT_TOKEN_TTL = 600  # seconds
+
+
+def _artifact_signing_key() -> str:
+    from glc.config import get_or_create_install_token
+
+    return get_or_create_install_token()
+
+
+def sign_artifact_token(sha: str, *, expires_at: int | None = None) -> str:
+    """Mint a signed, expiring token authorising a read of one artifact sha.
+
+    Returns ``<expiry>.<hex_sig>`` where sig = HMAC-SHA256(key, sha|expiry).
+    Attach it as ``?token=`` on the MediaUrl handed to Twilio.
+    """
+    import time as _time
+
+    exp = expires_at if expires_at is not None else int(_time.time()) + _ARTIFACT_TOKEN_TTL
+    mac = hmac.new(_artifact_signing_key().encode(), f"{sha}|{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{mac}"
+
+
+def verify_artifact_token(sha: str, token: str | None) -> bool:
+    """Constant-time validation of a signed artifact token for ``sha``."""
+    import time as _time
+
+    if not token or "." not in token:
+        return False
+    exp_str, _, sig = token.partition(".")
+    try:
+        exp = int(exp_str)
+    except ValueError:
+        return False
+    if exp < int(_time.time()):
+        return False
+    expected = hmac.new(_artifact_signing_key().encode(), f"{sha}|{exp}".encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, sig)
+
+
 async def gateway_roundtrip(
     envelope: ChannelMessage,
     *,
@@ -148,9 +194,19 @@ def build_app(
     if serve_artifacts:
 
         @app.get("/artifacts/{sha}")
-        async def get_artifact(sha: str) -> Response:
-            # Twilio fetches outbound MMS MediaUrls from here. The store's
-            # _validate_ref guards the sha against path traversal.
+        async def get_artifact(sha: str, request: Request) -> Response:
+            # Part 2 fix: require a valid signed token (query ?token= or
+            # Authorization: Bearer). Twilio fetches with the signed MediaUrl
+            # the gateway minted via sign_artifact_token(); anonymous/guessing
+            # callers are refused. The store's _validate_ref still guards the
+            # sha against path traversal.
+            token = request.query_params.get("token")
+            if token is None:
+                auth = request.headers.get("authorization") or ""
+                if auth.startswith("Bearer "):
+                    token = auth.removeprefix("Bearer ").strip()
+            if not verify_artifact_token(sha, token):
+                return Response(status_code=403, content="forbidden")
             data = artifacts.get_bytes(f"art:{sha}")
             if data is None:
                 return Response(status_code=404, content="not found")
