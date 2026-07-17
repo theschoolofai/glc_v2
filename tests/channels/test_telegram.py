@@ -11,7 +11,10 @@ https://core.telegram.org/bots/api — `getUpdates` for inbound,
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +22,19 @@ from glc.channels.catalogue.telegram.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.telegram_mock import OWNER_ID, STRANGER_ID, TelegramMock
+
+# The gateway (glc.providers) is the sole holder of LLM provider credentials.
+# Channel adapters, including this one, translate wire formats and must never
+# read these. TELEGRAM_BOT_TOKEN is the one secret this adapter legitimately
+# owns, so it's excluded.
+_GATEWAY_PROVIDER_KEY_ENV_VARS = (
+    "GEMINI_API_KEY",
+    "NVIDIA_API_KEY",
+    "GROQ_API_KEY",
+    "CEREBRAS_API_KEY",
+    "OPEN_ROUTER_API_KEY",
+    "GITHUB_ACCESS_TOKEN",
+)
 
 
 @pytest.fixture
@@ -129,4 +145,66 @@ async def test_channel_specific_behaviour_photo_attachment(mock, pair_owner):
     assert img is not None, "photo Attachment must have kind='image'"
     assert "photos/file_AgADBAADREALPHOTO" in img.ref, (
         "Attachment.ref should encode the resolved file_path from getFile, not the raw file_id"
+    )
+
+
+# ── Trust-boundary tests ─────────────────────────────────────────────
+#
+# Adapters run inside the same process as the gateway, which holds every
+# LLM provider's API key as an env var. The trust model says those keys
+# belong to glc.providers alone; an adapter's job is to shuttle messages
+# in and out, nothing more. Regression coverage for a breach where the
+# Telegram adapter carried `gemini_key = os.environ["GEMINI_API_KEY"]`
+# as a class attribute -- read unconditionally at import time, with no
+# use anywhere in the file.
+
+
+def test_adapter_class_holds_no_provider_key_attribute():
+    """The exact shape of the breach: a class/instance attribute caching
+    a gateway provider key. `dir()` catches it under any attribute name,
+    not just `gemini_key`."""
+    adapter = Adapter(config={})
+    for holder in (Adapter, adapter):
+        for attr_name in dir(holder):
+            if attr_name.startswith("__"):
+                continue
+            assert "gemini" not in attr_name.lower(), (
+                f"{holder!r}.{attr_name} looks like a leaked provider key attribute"
+            )
+
+
+def test_adapter_source_never_names_a_gateway_provider_key():
+    """Static guard: even a lazy `os.getenv(...)` inside a method body,
+    not just a class attribute, would be the same breach. Assert none of
+    the gateway's provider-key env var names appear anywhere in the
+    adapter's source."""
+    import glc.channels.catalogue.telegram.adapter as telegram_adapter_module
+
+    source = Path(telegram_adapter_module.__file__).read_text()
+    for var in _GATEWAY_PROVIDER_KEY_ENV_VARS:
+        assert var not in source, (
+            f"telegram adapter source references {var} -- channel adapters must "
+            "never read LLM provider keys; those belong to glc.providers alone"
+        )
+
+
+def test_adapter_imports_without_any_gateway_provider_key_set():
+    """The adapter has no legitimate use for provider keys, so it must not
+    require any of them to exist. Runs the import in a fresh subprocess
+    with every gateway provider key stripped from the environment, so a
+    key that happens to be set (or unset) in the test runner's own env
+    can't mask a hard `os.environ[...]` dependency either way."""
+    import os
+
+    env = {k: v for k, v in os.environ.items() if k not in _GATEWAY_PROVIDER_KEY_ENV_VARS}
+    result = subprocess.run(
+        [sys.executable, "-c", "import glc.channels.catalogue.telegram.adapter"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        "telegram adapter must import cleanly with no gateway provider keys set:\n"
+        f"{result.stderr}"
     )

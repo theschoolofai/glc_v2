@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 
+from glc.voice import sandbox
 from glc.voice.tts.base import SynthesizeResult, TTSError, TTSProvider
 
 PREFER_TO_PROVIDER: dict[str, str] = {
@@ -47,19 +48,48 @@ def _load_provider(name: str) -> TTSProvider:
     return cls()
 
 
-async def synthesize(text: str, voice_id: str | None = None, prefer: str = "default") -> SynthesizeResult:
+async def synthesize(
+    text: str,
+    voice_id: str | None = None,
+    prefer: str = "default",
+    *,
+    modal_app=None,
+    modal_image=None,
+) -> SynthesizeResult:
     if prefer not in PREFER_TO_PROVIDER:
         raise TTSError(f"unknown prefer={prefer!r}. Pick one of: {list(PREFER_TO_PROVIDER)}")
     name = PREFER_TO_PROVIDER[prefer]
-    provider = _load_provider(name)
     try:
-        return await provider.synthesize(text, voice_id)
+        return await _dispatch(name, text, voice_id, modal_app, modal_image)
     except NotImplementedError as e:
         raise TTSError(
             f"TTS provider '{name}' is a stub (group assignment not yet merged). "
             f"Try `prefer=fallback` for the always-on system TTS. ({e})",
             status=501,
         ) from e
+    except sandbox.SandboxProcessError as e:
+        raise TTSError(f"TTS provider '{name}' failed in its sandbox: {e}", status=502) from e
+
+
+async def _dispatch(
+    name: str, text: str, voice_id: str | None, modal_app, modal_image
+) -> SynthesizeResult:
+    """Sandboxed dispatch when a real modal_app/modal_image are supplied
+    and this provider is registered in glc.voice.sandbox.SANDBOX_SPEC
+    (see docs/fix_security_breach.md, "Round eleven") -- otherwise the
+    plain in-process call, unchanged from before this round."""
+    if modal_app is not None and modal_image is not None and sandbox.is_sandboxable("tts", name):
+        result = await sandbox.run_in_sandbox(
+            modal_app,
+            modal_image,
+            "tts",
+            name,
+            "synthesize",
+            {"text": text, "voice_id": voice_id},
+        )
+        return SynthesizeResult(**result)
+    provider = _load_provider(name)
+    return await provider.synthesize(text, voice_id)
 
 
 def register_test_provider(name: str, provider: TTSProvider | None) -> None:

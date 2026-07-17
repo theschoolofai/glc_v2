@@ -13,12 +13,13 @@ from __future__ import annotations
 import asyncio as _asyncio
 import json
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -35,6 +36,7 @@ from glc.llm_schemas import (
     ToolCall,
     VisionRequest,
 )
+from glc.routes.control import _check_data_plane_rate_limit, _require_token
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
@@ -285,25 +287,81 @@ def _required_caps(req: ChatRequest):
     return caps
 
 
+def _sanitized_fetch_error(url: str, e: Exception) -> str:
+    """A failed image fetch used to embed the raw httpx exception text
+    (connection errors, OS resolver errno strings, upstream status/reason)
+    straight into the 400 body -- network/infra details an unauthenticated-
+    looking client could use to fingerprint the network the gateway sits
+    on. Logs the full detail server-side (queryable via /v1/calls, which
+    requires the same install token this caller already presented to
+    reach this route at all) and returns only a generic message plus a
+    short reference id.
+    """
+    ref = secrets.token_hex(4)
+    db.log_call(
+        provider="image_fetch",
+        model="(none)",
+        status="error",
+        error=f"[{ref}] {url!r}: {e}"[:500],
+        call_role="image_fetch",
+    )
+    return f"failed to fetch image url (ref: {ref}); detail logged server-side, see /v1/calls"
+
+
 async def _resolve_image_urls(messages):
     import base64
 
     import httpx as _httpx
 
+    from glc.security.ssrf import BlockedURLError, assert_public_url
+
+    MAX_IMAGE_REDIRECTS = 5
+
     async def _fetch_to_data_url(url: str) -> str:
+        from glc.security.resource_limits import MAX_IMAGE_FETCH_BYTES
+
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        # follow_redirects=False: each hop is re-validated below before it's
+        # followed, so a redirect can't be used to reach a non-public address
+        # that would've been rejected if given directly.
+        async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
+            for _ in range(MAX_IMAGE_REDIRECTS + 1):
+                try:
+                    await assert_public_url(url)
+                except BlockedURLError as e:
+                    raise HTTPException(400, f"refusing to fetch image url {url!r}: {e}")
+                try:
+                    # Streamed (not client.get()) so a huge/slow-loris body
+                    # never gets fully buffered before the size cap below
+                    # gets a chance to abort it -- docs/strides_testing.md's
+                    # Denial-of-service entry names exactly this ("a huge
+                    # image... exhausts memory") as a case client.get()'s
+                    # buffer-then-return behavior didn't guard against.
+                    async with c.stream("GET", url) as r:
+                        if r.next_request is not None:
+                            url = str(r.next_request.url)
+                            continue
+                        try:
+                            r.raise_for_status()
+                        except _httpx.HTTPError as e:
+                            raise HTTPException(400, _sanitized_fetch_error(url, e))
+                        mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+                        body = bytearray()
+                        async for chunk in r.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) > MAX_IMAGE_FETCH_BYTES:
+                                raise HTTPException(
+                                    400,
+                                    f"image url {url!r} exceeded the {MAX_IMAGE_FETCH_BYTES}-byte fetch limit",
+                                )
+                        b64 = base64.b64encode(bytes(body)).decode()
+                        return f"data:{mt};base64,{b64}"
+                except _httpx.HTTPError as e:
+                    raise HTTPException(400, _sanitized_fetch_error(url, e))
+            raise HTTPException(400, f"too many redirects fetching image url {url!r}")
 
     out = []
     for m in messages:
@@ -346,6 +404,39 @@ def _validate_structured(text: str, schema: dict):
 
 @router.post("/v1/chat")
 async def chat(req: ChatRequest, request: Request):
+    # Data-plane routes dispatch straight to paid upstream providers with
+    # no auth at all before this check existed -- anyone with the URL could
+    # run up the operator's bill or DoS the deployment. Same install-token
+    # gate /v1/control/* and /v1/cost/by_agent already use. Checked off
+    # request.headers directly (not a Header(...) dependency) so the check
+    # still fires when vision()/chat_batch() call this function in-process
+    # rather than through FastAPI's own routing.
+    _require_token(request.headers.get("authorization"))
+    _check_data_plane_rate_limit("chat")
+    if req.tools:
+        from glc.security.prompt_injection import scan_tool_defs
+
+        problems = scan_tool_defs(req.tools)
+        if problems:
+            raise HTTPException(400, f"tool definition(s) rejected by prompt-injection scan: {problems}")
+    if req.messages:
+        # docs/attack_chain_fix.md: scan_tool_defs() above only ever
+        # covered the tool *definitions* a caller supplies -- the
+        # conversation itself, including anything shaped like a tool's
+        # own returned output ({"role": "tool"/"function", ...}),
+        # reached the model with zero scrutiny. scan_messages() closes
+        # that specific, live surface -- see its own docstring for why
+        # it's scoped to tool/function roles and not the human
+        # principal's own messages.
+        from glc.security.prompt_injection import scan_messages
+
+        msg_problems = scan_messages(req.messages)
+        if msg_problems:
+            raise HTTPException(400, f"message(s) rejected by prompt-injection scan: {msg_problems}")
+    from glc.security.resource_limits import MAX_TOKENS_CEILING
+
+    if req.max_tokens > MAX_TOKENS_CEILING:
+        raise HTTPException(400, f"max_tokens {req.max_tokens} exceeds the ceiling of {MAX_TOKENS_CEILING}")
     state = request.app.state
     rtr = state.router
     router_pool = state.router_pool
@@ -605,7 +696,11 @@ async def chat(req: ChatRequest, request: Request):
                 tag += f" → backoff {secs:.0f}s ({reason})"
             all_attempts.append({"provider": name, "reason": tag})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                # Logged in full just above (db.log_call, status="error")
+                # -- this used to also embed the raw provider exception
+                # (e.g. a Gemini 400 body verbatim) in the client-facing
+                # message. See docs/fix_security_breach.md, "Round nine", C4.
+                raise HTTPException(502, f"{name} failed; detail logged server-side, see /v1/calls")
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
@@ -630,15 +725,35 @@ async def chat(req: ChatRequest, request: Request):
             )
             all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                # Same fix as the ProviderError branch above -- detail is
+                # already logged (db.log_call just above), the client
+                # only gets a generic message now.
+                raise HTTPException(502, f"{name} failed; detail logged server-side, see /v1/calls")
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    # Used to embed the raw attempts list (each entry already truncated
+    # exception text, e.g. "failed: <SDK error message>") and last_err
+    # verbatim in the client-facing body -- upstream SDK/network detail
+    # an unauthenticated-looking client could use to fingerprint providers
+    # or the gateway's network. Every attempt was already logged
+    # server-side above (db.log_call, status="error") before this point,
+    # so nothing is lost by not repeating it here.
+    raise HTTPException(
+        503,
+        f"all providers unavailable after {len(all_attempts)} attempt(s); detail logged server-side, see /v1/calls",
+    )
 
 
 @router.post("/v1/chat/batch")
 async def chat_batch(req: BatchChatRequest, request: Request):
+    # Checked here too, not just inside the per-call chat(): _one() below
+    # catches HTTPException and folds it into a 200 body per item, so
+    # without this an unauthenticated batch call would come back 200 with
+    # every item individually reporting status_code=401 instead of a clean
+    # top-level 401.
+    _require_token(request.headers.get("authorization"))
+    _check_data_plane_rate_limit("chat_batch")
     sem = _asyncio.Semaphore(max(1, req.max_concurrency))
 
     async def _one(call: ChatRequest):
@@ -656,6 +771,8 @@ async def chat_batch(req: BatchChatRequest, request: Request):
 
 @router.post("/v1/vision")
 async def vision(req: VisionRequest, request: Request):
+    _require_token(request.headers.get("authorization"))
+    _check_data_plane_rate_limit("vision")
     content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
     content.append({"type": "image_url", "image_url": {"url": req.image}})
     inner = ChatRequest(
@@ -678,6 +795,8 @@ async def vision(req: VisionRequest, request: Request):
 
 @router.post("/v1/embed")
 async def embed(req: EmbedRequest, request: Request):
+    _require_token(request.headers.get("authorization"))
+    _check_data_plane_rate_limit("embed")
     from glc import embedders as E
 
     state = request.app.state
@@ -740,7 +859,8 @@ async def embed(req: EmbedRequest, request: Request):
 
 
 @router.get("/v1/embedders")
-async def list_embedders(request: Request):
+async def list_embedders(request: Request, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
     from glc import embedders as E
 
     state = request.app.state
@@ -756,7 +876,16 @@ async def list_embedders(request: Request):
 
 
 @router.get("/v1/cost/by_agent")
-async def cost_by_agent(session: str | None = None, agent: str | None = None):
+async def cost_by_agent(
+    session: str | None = None,
+    agent: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    # Per-agent/session token counts and estimated spend are usage
+    # metadata, not a secret -- but they were the one asset in
+    # docs/threat_model.md with no protection at all, unlike every
+    # /v1/control/* route. Same install-token gate as those.
+    _require_token(authorization)
     from glc import pricing as _pricing
 
     raw = db.by_agent(session=session)
@@ -773,7 +902,8 @@ async def cost_by_agent(session: str | None = None, agent: str | None = None):
 
 
 @router.get("/v1/providers")
-async def list_providers(request: Request):
+async def list_providers(request: Request, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
     r = request.app.state.router
     return {
         "order": r.order,
@@ -785,7 +915,8 @@ async def list_providers(request: Request):
 
 
 @router.get("/v1/capabilities")
-async def capabilities(request: Request):
+async def capabilities(request: Request, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
     r = request.app.state.router
     out = {}
     for name, p in r.providers.items():
@@ -804,7 +935,8 @@ async def capabilities(request: Request):
 
 
 @router.get("/v1/status")
-async def status(request: Request):
+async def status(request: Request, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
     r = request.app.state.router
     return {
         "order": r.order,
@@ -815,7 +947,8 @@ async def status(request: Request):
 
 
 @router.get("/v1/routers")
-async def routers(request: Request):
+async def routers(request: Request, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
     rp = request.app.state.router_pool
     return {
         "order": rp.order,
@@ -829,5 +962,11 @@ async def routers(request: Request):
 
 
 @router.get("/v1/calls")
-async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
+async def calls(
+    limit: int = 100,
+    provider: str | None = None,
+    status: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    _require_token(authorization)
     return db.recent(limit=limit, provider=provider, status=status)

@@ -15,15 +15,15 @@ import sys
 
 import httpx
 
-# Load environment
-from dotenv import load_dotenv
-
 from glc.channels.catalogue.telegram.adapter import Adapter
 from glc.channels.envelope import ChannelReply
 from glc.config import get_or_create_install_token
+from glc.dev_env import load_only
 from glc.security.pairing import get_pairing_store
 
-load_dotenv()
+# Only this script's own vars -- not every gateway provider key that
+# happens to live in the same .env file. See glc/dev_env.py.
+load_only("TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "GLC_PORT")
 
 
 async def main() -> None:
@@ -52,10 +52,12 @@ async def main() -> None:
     # Instantiate the adapter
     adapter = Adapter()
 
-    # WebSocket URL
-    ws_url = f"ws://localhost:{gateway_port}/v1/channels/telegram?token={install_token}"
+    # WebSocket URL -- the install token now travels only as an
+    # Authorization header, never as a ?token= query param (query strings
+    # land in access logs, proxy logs, and shell history).
+    ws_url = f"ws://localhost:{gateway_port}/v1/channels/telegram"
 
-    print(f"Connecting to GLC Gateway WebSocket at: ws://localhost:{gateway_port}/v1/channels/telegram")
+    print(f"Connecting to GLC Gateway WebSocket at: {ws_url}")
 
     try:
         import websockets
@@ -64,7 +66,7 @@ async def main() -> None:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets"])
         import websockets
 
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(ws_url, additional_headers={"Authorization": f"Bearer {install_token}"}) as ws:
         print("Connected to GLC Gateway WebSocket!")
         offset = 0
 

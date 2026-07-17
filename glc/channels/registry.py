@@ -44,6 +44,24 @@ def list_channels() -> list[str]:
     return sorted(discover().keys())
 
 
+def declared_channel_names() -> set[str]:
+    """Subpackage names under the catalogue, without importing any of
+    them. Unlike discover()/get()/list_channels(), this never runs a
+    single line of adapter code -- it only lists directory entries via
+    pkgutil, the same way `import glc.channels.catalogue` (which every
+    caller of this module has already paid for) doesn't import its
+    subpackages either.
+
+    Exists so callers that only need to know "is this a real channel
+    slot" (e.g. glc.routes.channels.channel_webhook's 404 check) don't
+    have to import all 15 catalogue adapters into their own process just
+    to answer that question. See docs/fix_security_breach.md, round
+    three addendum.
+    """
+    pkg = importlib.import_module(CATALOGUE_PACKAGE)
+    return {name for _, name, ispkg in pkgutil.iter_modules(pkg.__path__) if ispkg}
+
+
 def instantiate(name: str, config: dict[str, Any] | None = None) -> ChannelAdapter:
     cls = get(name)
     if cls is None:

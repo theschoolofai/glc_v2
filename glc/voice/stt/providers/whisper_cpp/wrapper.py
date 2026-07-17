@@ -32,8 +32,37 @@ WHISPER_THREADS = int(os.getenv("GLC_WHISPER_THREADS", str(_DEFAULT_THREADS)))
 # with negligible accuracy loss on typical speech.
 WHISPER_BEAM_SIZE = int(os.getenv("GLC_WHISPER_BEAM_SIZE", "2"))
 
+# Docs/strides_testing.md's Injection entry names this file directly:
+# `mime` is caller-supplied (glc/routes/transcribe.py's request schema
+# takes it as a free string, default "audio/wav") and flows into the
+# subprocess argv built below. That argv stays list-form with no shell
+# invocation involved (confirmed by tests/test_inprocess_rung4_findings.py's
+# AST scan across this whole package, and by this file's own dedicated
+# tests/voice/test_whisper_cpp_command_injection.py), so `mime`'s
+# contents were never shell-interpretable. The genuine gap `mime` had
+# before this allowlist: any string not containing the substring "wav"
+# silently fell through to ".bin" with no validation at all -- tightened
+# to an explicit allowlist so an unrecognized value is a loud rejection
+# instead of a silent default.
+_MIME_TO_SUFFIX = {
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/raw": ".bin",
+    "audio/pcm": ".bin",
+    "audio/l16": ".bin",
+}
+
 
 def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str, str, int]:
+    # Validate caller-supplied input before touching PATH/filesystem for
+    # the binary/model -- fail fast on a malformed `mime` rather than
+    # spending a lookup on dependencies that don't matter if the request
+    # was going to be rejected anyway.
+    suffix = _MIME_TO_SUFFIX.get(mime)
+    if suffix is None:
+        raise ValueError(f"unsupported mime type for whisper_cpp: {mime!r}")
+
     cli = shutil.which("whisper-cli") or shutil.which("whisper.cpp")
     if cli is None:
         raise RuntimeError(
@@ -46,7 +75,6 @@ def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str
             f"whisper base model not found at {MODEL_FILE}. Run "
             "`daemon/install.sh --models` or download manually."
         )
-    suffix = ".wav" if "wav" in mime else ".bin"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(audio)
         audio_path = Path(f.name)

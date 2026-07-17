@@ -8,14 +8,13 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from pathlib import Path
-
-from dotenv import load_dotenv
 
 from glc.channels.catalogue.discord.tests.run_discord_bridge import RealDiscordClient
+from glc.dev_env import load_only
 
-# Load environment variables from .env at repository root
-load_dotenv(Path(__file__).resolve().parents[5] / ".env")
+# Only this script's own vars -- not every gateway provider key that
+# happens to live in the same .env file. See glc/dev_env.py.
+load_only("DISCORD_BOT_TOKEN", "DISCORD_TEST_CHANNEL_ID")
 
 
 async def main():

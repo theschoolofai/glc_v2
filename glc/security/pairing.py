@@ -189,7 +189,22 @@ class PairingStore:
     ) -> PairingRecord:
         """Out-of-band pairing for the installation owner. Used by the
         installer to bootstrap the first owner identity. Not exposed
-        through HTTP."""
+        through HTTP.
+
+        Refuses to run inside an isolated adapter subprocess (see
+        glc/channels/isolation.py's ADAPTER_SANDBOX_MARKER) -- a channel
+        adapter's on_message/send has no legitimate reason to grant
+        owner_paired trust to anyone, and round three's whole point was
+        keeping gateway-owned state like this out of that subprocess's
+        reach. This does not defend against a caller sharing the
+        gateway's own interpreter (docs/threat_model.md's rung 4, an
+        accepted ceiling for pure-Python state); it closes the narrower,
+        newly-reachable path the isolated subprocess opened.
+        """
+        if os.environ.get("GLC_ADAPTER_SANDBOX") == "1":
+            raise PermissionError(
+                "force_pair_owner() cannot be called from an isolated adapter subprocess"
+            )
         paired_at = time.time()
         with _conn() as c:
             c.execute(

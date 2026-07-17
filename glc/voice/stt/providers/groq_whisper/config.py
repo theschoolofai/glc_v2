@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 
+from glc.providers import get_provider_key
+
 DEFAULT_MODEL = "whisper-large-v3-turbo"
 
 
 def load_config(config_dict: dict) -> tuple[str, str]:
     """Load the target API key and model identifier."""
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = get_provider_key("GROQ_API_KEY")
     if not api_key:
         raise NotImplementedError("GROQ_API_KEY environment variable is not set")
 

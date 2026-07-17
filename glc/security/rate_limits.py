@@ -84,3 +84,26 @@ def get_rate_limiter() -> RateLimiter:
         _limiter = RateLimiter()
         _limiter.configure_from_yaml(load_channels())
     return _limiter
+
+
+_data_plane_limiter: RateLimiter | None = None
+
+
+def get_data_plane_limiter() -> RateLimiter:
+    """A separate limiter for the HTTP data-plane routes (/v1/chat,
+    /v1/vision, /v1/embed, /v1/chat/batch, /v1/speak, /v1/transcribe).
+
+    Deliberately not the same instance get_rate_limiter() returns:
+    that one's config (channels.yaml's defaults.rate_limits) is
+    documented and tuned for per-channel-user chat messages, a
+    different semantic than "how many HTTP requests per minute is this
+    one shared install-token allowed to make." One route name = one
+    bucket, via check_message(route_name, "-") on this instance.
+    """
+    global _data_plane_limiter
+    if _data_plane_limiter is None:
+        import os
+
+        rpm = int(os.getenv("GLC_DATA_PLANE_RPM_LIMIT", "60"))
+        _data_plane_limiter = RateLimiter(default_mpm=rpm, default_tpm=rpm)
+    return _data_plane_limiter

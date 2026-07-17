@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from glc.routes.control import _check_data_plane_rate_limit, _require_token
 from glc.voice.stt import STTError, transcribe
 
 router = APIRouter()
@@ -29,13 +30,21 @@ class TranscribeResponse(BaseModel):
 
 
 @router.post("/v1/transcribe", response_model=TranscribeResponse)
-async def transcribe_route(req: TranscribeRequest):
+async def transcribe_route(req: TranscribeRequest, request: Request):
+    _require_token(request.headers.get("authorization"))
+    _check_data_plane_rate_limit("transcribe")
     try:
         audio = base64.b64decode(req.audio_b64)
     except Exception as e:
         raise HTTPException(400, f"audio_b64 is not valid base64: {e}") from e
     try:
-        r = await transcribe(audio, req.mime, prefer=req.prefer)
+        r = await transcribe(
+            audio,
+            req.mime,
+            prefer=req.prefer,
+            modal_app=getattr(request.app.state, "modal_app", None),
+            modal_image=getattr(request.app.state, "modal_image", None),
+        )
     except STTError as e:
         if req.prefer == "streaming":
             raise HTTPException(400, str(e)) from e

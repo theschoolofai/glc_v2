@@ -302,6 +302,25 @@ class Adapter(ChannelAdapter):
         if parsed is None:
             return None
 
+        # The signature checks above prove this body was really sent by
+        # Twilio/Meta at some point -- they carry no freshness, so a
+        # captured body replays until the app secret rotates
+        # (docs/strides_testing.md's Replay entry). Bind each message to
+        # one use via its own message_id; a second delivery of the same
+        # id is dropped the same way an unauthorised message already is.
+        #
+        # GLC_REPLAY_DB reaches this isolated subprocess automatically --
+        # glc/channels/isolation.py's derive_adapter_env() forwards it to
+        # every channel unconditionally (_SAFE_STATE_VARS), not just
+        # channels whose own adapter.py source happens to reference it.
+        # See that module's docstring and docs/advanced_issue_found.md
+        # for why this file used to need its own explicit read here (it
+        # doesn't anymore -- the general rule replaced the one-off fix).
+        from glc.security.replay_guard import record_if_new
+
+        if not record_if_new("whatsapp", parsed.message_id):
+            return None
+
         owner_ids = [r.channel_user_id for r in get_pairing_store().owners("whatsapp")]
         trust = classify("whatsapp", parsed.from_id)
         ok, _why = allowed(

@@ -18,6 +18,7 @@ import hashlib
 import os
 from datetime import UTC, datetime
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -294,8 +295,20 @@ class Adapter(ChannelAdapter):
                 return f"{base.rstrip('/')}/{sha}"
         return None
 
+    # MediaUrl{i} arrives inside the inbound webhook form -- signed by
+    # Twilio at the route level (see glc/routes/channels.py's
+    # _twilio_signature_ok), but the *value* of MediaUrl{i} is still
+    # whatever the request body says. Only ever fetch it from Twilio's
+    # own media API host: the account's Basic-Auth credentials must
+    # never be sent anywhere else. See docs/fix_security_breach.md,
+    # round three addendum.
+    _ALLOWED_MEDIA_HOSTS = frozenset({"api.twilio.com"})
+
     async def _download_media(self, url: str) -> bytes:
         """Download Twilio-hosted MMS media using Basic Auth."""
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in self._ALLOWED_MEDIA_HOSTS:
+            raise ValueError(f"refusing to fetch MMS media from untrusted host: {url!r}")
         account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
         auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
         async with httpx.AsyncClient() as client:

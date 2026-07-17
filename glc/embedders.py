@@ -204,7 +204,9 @@ def build_embedders() -> tuple[list[EmbeddingProvider], list[str]]:
         "ollama": OllamaEmbedder(ollama_model, ollama_url),
     }
     if fallback_provider == "gemini":
-        key = os.getenv("GEMINI_API_KEY")
+        from glc.providers import get_provider_key
+
+        key = get_provider_key("GEMINI_API_KEY")
         if key:
             registry["gemini"] = GeminiEmbedder(key, fallback_model)
 

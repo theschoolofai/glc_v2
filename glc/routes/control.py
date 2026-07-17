@@ -7,6 +7,7 @@ The kill endpoint binds 127.0.0.1 only; the host check is enforced here.
 
 from __future__ import annotations
 
+import hmac
 import os
 import signal
 import time
@@ -16,17 +17,37 @@ from pydantic import BaseModel
 
 from glc.config import get_or_create_install_token
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
+from glc.security.rate_limits import get_data_plane_limiter
 
 router = APIRouter()
 
 
 def _require_token(authorization: str | None) -> None:
+    # docs/strides_testing.md's attack catalogue, Category 11: "timing
+    # oracles on token comparison." Plain `!=` on strings short-circuits
+    # at the first mismatched byte, which leaks (over enough requests
+    # and enough network-jitter averaging) how many leading bytes of a
+    # guess were correct. hmac.compare_digest runs in time dependent
+    # only on the length of its inputs, not their content.
     expected = get_or_create_install_token()
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
     presented = authorization.removeprefix("Bearer ").strip()
-    if presented != expected:
+    if not hmac.compare_digest(presented, expected):
         raise HTTPException(403, "install token mismatch")
+
+
+def _check_data_plane_rate_limit(route_name: str) -> None:
+    """Per-route cap (GLC_DATA_PLANE_RPM_LIMIT/min, default 60) on the
+    HTTP data-plane routes -- /v1/chat and friends had auth added
+    (docs/fix_security_breach.md rounds six/seven) but nothing bounded
+    how many times a valid, possibly-leaked token could call them.
+    Call after _require_token(), not before: an unauthenticated caller
+    should get 401 before spending a slot in this bucket.
+    """
+    ok, why = get_data_plane_limiter().check_message(route_name, "-")
+    if not ok:
+        raise HTTPException(429, why)
 
 
 class PairRequest(BaseModel):
@@ -63,6 +84,14 @@ async def pair(req: PairRequest, authorization: str | None = Header(default=None
 @router.post("/v1/control/pair/confirm")
 async def pair_confirm(req: PairConfirmRequest, authorization: str | None = Header(default=None)):
     _require_token(authorization)
+    # confirm_code() has no attempt counter or lockout of its own (see
+    # docs/fix_security_breach.md, "Round nine", C6) -- this route is
+    # already the only HTTP-reachable caller and already requires the
+    # install token, so a code-guessing attacker needs that token first,
+    # at which point they could just mint and confirm their own code
+    # instead of guessing. Rate-limited anyway as defense in depth, not
+    # because it's the primary defense here.
+    _check_data_plane_rate_limit("pair_confirm")
     rec = get_pairing_store().confirm_code(req.code)
     if rec is None:
         raise HTTPException(404, "code unknown or expired")

@@ -65,3 +65,35 @@ def test_pair_bad_trust_level_400(app_client, install_token):
         json={"channel": "x", "channel_user_id": "1", "trust_level": "untrusted"},
     )
     assert r.status_code == 400
+
+
+def test_cost_by_agent_without_token_is_unauthorized(app_client):
+    """docs/threat_model.md gap #6: the cost ledger used to have no auth
+    check at all, unlike every other /v1/control/* route in this file."""
+    r = app_client.get("/v1/cost/by_agent")
+    assert r.status_code == 401
+
+
+def test_cost_by_agent_with_bad_token_is_forbidden(app_client):
+    r = app_client.get("/v1/cost/by_agent", headers={"Authorization": "Bearer bogus"})
+    assert r.status_code == 403
+
+
+def test_cost_by_agent_with_valid_token_succeeds(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    r = app_client.get("/v1/cost/by_agent", headers=h)
+    assert r.status_code == 200
+    assert isinstance(r.json(), dict)
+
+
+def test_require_token_uses_constant_time_comparison():
+    """Attack catalogue, Category 11: "timing oracles on token
+    comparison." _require_token must use hmac.compare_digest, not a
+    plain `!=`, which short-circuits at the first mismatched byte."""
+    import inspect
+
+    from glc.routes import control
+
+    source = inspect.getsource(control._require_token)
+    assert "hmac.compare_digest" in source
+    assert " != expected" not in source and "expected !=" not in source

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from glc.routes.control import _check_data_plane_rate_limit, _require_token
 from glc.voice.tts import TTSError, synthesize
 
 router = APIRouter()
@@ -28,9 +29,17 @@ class SpeakResponse(BaseModel):
 
 
 @router.post("/v1/speak", response_model=SpeakResponse)
-async def speak_route(req: SpeakRequest):
+async def speak_route(req: SpeakRequest, request: Request):
+    _require_token(request.headers.get("authorization"))
+    _check_data_plane_rate_limit("speak")
     try:
-        r = await synthesize(req.text, voice_id=req.voice_id, prefer=req.prefer)
+        r = await synthesize(
+            req.text,
+            voice_id=req.voice_id,
+            prefer=req.prefer,
+            modal_app=getattr(request.app.state, "modal_app", None),
+            modal_image=getattr(request.app.state, "modal_image", None),
+        )
     except TTSError as e:
         raise HTTPException(e.status or 502, str(e)) from e
     return SpeakResponse(
