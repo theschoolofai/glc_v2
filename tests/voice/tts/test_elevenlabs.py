@@ -80,3 +80,58 @@ async def test_channel_specific_behaviour_free_tier_quota_tracking(mock):
         await adapter.synthesize("this is a long enough message to bust the cap", voice_id="rachel")
     assert ei.value.status == 429
     assert "quota" in str(ei.value).lower() or "limit" in str(ei.value).lower()
+
+
+def test_voice_id_path_traversal_normalizes_off_tts_route():
+    """Document the pre-fix attack: httpx collapses .. in the TTS URL."""
+    import httpx
+
+    from glc.voice.tts.providers.elevenlabs.adapter import ELEVENLABS_TTS_URL
+
+    crafted = ELEVENLABS_TTS_URL.format(voice_id="abc/../../user")
+    assert str(httpx.URL(crafted)) == "https://api.elevenlabs.io/v1/user"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["abc/../../user", "../user", "x/../../../v1/voices", "id?x=1", "has/slash", ""],
+)
+def test_voice_id_allowlist_rejects_traversal(bad: str):
+    from glc.voice.tts.providers.elevenlabs.adapter import _validate_voice_id
+
+    with pytest.raises(TTSError) as ei:
+        _validate_voice_id(bad)
+    assert ei.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_call_upstream_rejects_path_traversal_before_http(monkeypatch):
+    import httpx
+
+    called = {"n": 0}
+
+    class _BoomClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            called["n"] += 1
+            raise AssertionError("HTTP must not run for a traversing voice_id")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda: _BoomClient())
+    provider = Provider()
+    with pytest.raises(TTSError) as ei:
+        await provider._call_upstream("hi", "abc/../../user")
+    assert ei.value.status == 400
+    assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_synthesize_real_path_rejects_traversing_voice_id():
+    provider = Provider()  # no mock → real path validates before HTTP
+    with pytest.raises(TTSError) as ei:
+        await provider.synthesize("hello", voice_id="abc/../../user")
+    assert ei.value.status == 400
