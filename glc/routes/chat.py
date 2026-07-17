@@ -287,23 +287,70 @@ def _required_caps(req: ChatRequest):
 
 async def _resolve_image_urls(messages):
     import base64
-
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse, urljoin
     import httpx as _httpx
+
+    def is_public_ip(ip_str: str) -> bool:
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            if (ip.is_private or 
+                ip.is_loopback or 
+                ip.is_link_local or 
+                ip.is_multicast or 
+                ip.is_reserved or 
+                ip.is_unspecified):
+                return False
+            return True
+        except ValueError:
+            return False
+
+    def is_safe_url(url: str) -> bool:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = parsed.hostname
+        if not host:
+            return False
+        try:
+            infos = socket.getaddrinfo(host, None)
+            for info in infos:
+                ip = info[4][0]
+                if not is_public_ip(ip):
+                    return False
+            return True
+        except Exception:
+            return False
 
     async def _fetch_to_data_url(url: str) -> str:
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        current_url = url
+        max_redirects = 5
+        async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
+            for _ in range(max_redirects + 1):
+                if not is_safe_url(current_url):
+                    raise HTTPException(400, f"URL {current_url!r} is not allowed (blocked by SSRF policy)")
+                try:
+                    r = await c.get(current_url)
+                except _httpx.HTTPError as e:
+                    raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+                
+                if r.status_code in (301, 302, 303, 307, 308):
+                    loc = r.headers.get("location")
+                    if not loc:
+                        raise HTTPException(400, "Redirect with missing Location header")
+                    current_url = urljoin(current_url, loc)
+                    continue
+                else:
+                    r.raise_for_status()
+                    mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+                    b64 = base64.b64encode(r.content).decode()
+                    return f"data:{mt};base64,{b64}"
+            raise HTTPException(400, "Too many redirects")
 
     out = []
     for m in messages:
