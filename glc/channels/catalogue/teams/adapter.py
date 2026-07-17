@@ -14,11 +14,18 @@ Key wire-format facts from the Bot Framework docs:
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
+
+import jwt
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from jwt.algorithms import RSAAlgorithm
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.catalogue.teams.schemas import ADAPTIVE_CARD_CONTENT_TYPE
@@ -27,9 +34,77 @@ from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
 
+logger = logging.getLogger(__name__)
+
 _MENTION_RE = re.compile(r"<at>[^<]*</at>\s*")
 
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}  # app_id -> (token, expires_at)
+
+# Bot Framework's fixed, documented JWKS endpoint for verifying inbound
+# Activity JWTs. (The fully general form does OIDC discovery via
+# https://login.botframework.com/v1/.well-known/openidconfiguration first,
+# but that document's jwks_uri has been this same stable URL for years; every
+# lightweight Bot Framework integration hardcodes it the same way.)
+_BOT_FRAMEWORK_JWKS_URL = "https://login.botframework.com/v1/.well-known/keys"
+_BOT_FRAMEWORK_ISSUER = "https://api.botframework.com"
+_JWKS_CACHE_TTL_SECONDS = 24 * 60 * 60
+_jwks_cache: dict[str, Any] = {"fetched_at": 0.0, "jwks": None}
+
+# Test-only seam: findings/teams-no-jwt-validation/repro.py and
+# tests/test_teams_jwt_verification.py set this to a callable returning a
+# fake JWKS dict, so verification can be exercised without a real network
+# call to Microsoft. Production code must never set this.
+_jwks_provider_override: Callable[[], dict] | None = None
+
+
+def _fetch_bot_framework_jwks() -> dict:
+    if _jwks_provider_override is not None:
+        return _jwks_provider_override()
+    import httpx
+
+    now = time.time()
+    cached = _jwks_cache.get("jwks")
+    if cached is not None and now - _jwks_cache["fetched_at"] < _JWKS_CACHE_TTL_SECONDS:
+        return cached
+    resp = httpx.get(_BOT_FRAMEWORK_JWKS_URL, timeout=10.0)
+    resp.raise_for_status()
+    jwks = resp.json()
+    _jwks_cache["jwks"] = jwks
+    _jwks_cache["fetched_at"] = now
+    return jwks
+
+
+def verify_teams_jwt(token: str | None, app_id: str) -> bool:
+    """Verify an inbound Bot Framework Activity's bearer JWT: RS256
+    signature against Microsoft's published JWKS, issuer pinned to
+    api.botframework.com, audience pinned to this bot's own app id, and
+    (via PyJWT's default validation) expiry. Fails closed on any error --
+    a missing/unparseable token, an unknown key id, a bad signature, or a
+    mismatched issuer/audience/expiry all return False, never raise."""
+    if not token or not app_id:
+        return False
+    try:
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        if not kid:
+            return False
+        jwks = _fetch_bot_framework_jwks()
+        matching = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+        if matching is None:
+            return False
+        # A JWKS entry is always a public key; PyJWT's stubs type from_jwk()
+        # as the broader private-or-public union since the same helper also
+        # parses private JWKs elsewhere in the library.
+        key = cast(RSAPublicKey, RSAAlgorithm.from_jwk(json.dumps(matching)))
+        jwt.decode(token, key, algorithms=["RS256"], audience=app_id, issuer=_BOT_FRAMEWORK_ISSUER)
+        return True
+    except jwt.PyJWTError as e:
+        logger.warning("teams: rejected inbound Activity JWT: %s", e)
+        return False
+    except Exception:  # pragma: no cover - defensive: never let a malformed
+        # token or an unreachable JWKS endpoint crash the request handler.
+        logger.warning("teams: JWT verification failed unexpectedly", exc_info=True)
+        return False
 
 
 def _bfs_first_textblock(card: dict[str, Any]) -> str | None:
@@ -103,6 +178,41 @@ class Adapter(ChannelAdapter):
         # Disconnect signal: log and return None so the gateway can reconnect.
         if mock is not None and mock.pop_disconnect():
             return None
+
+        if isinstance(raw, dict) and "raw_body" in raw:
+            # This is the shape glc/routes/channels.py::channel_webhook always
+            # constructs for real network traffic -- the only path an
+            # external caller can actually reach. The inbound Activity's
+            # bearer JWT must verify against Microsoft's Bot Framework JWKS,
+            # pinned to this bot's own TEAMS_APP_ID, before any of its
+            # contents are trusted (invariant 2).
+            raw_body = raw["raw_body"]
+            if not isinstance(raw_body, bytes):
+                return None
+            headers = {k.lower(): v for k, v in (raw.get("headers") or {}).items()}
+            auth_header = headers.get("authorization", "")
+            token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else None
+            app_id = self.config.get("app_id") or os.environ.get("TEAMS_APP_ID", "")
+            if not verify_teams_jwt(token, app_id):
+                return None
+            try:
+                activity = json.loads(raw_body)
+            except json.JSONDecodeError:
+                return None
+        elif mock is not None:
+            # Test/mock harness convenience: an already-parsed Activity dict,
+            # the same pattern used by every other channel's mock in this
+            # repo (see slack/adapter.py's equivalent branch). Only
+            # reachable when a mock is explicitly configured, i.e. never
+            # from real network input.
+            activity = raw
+        else:
+            # No mock, no raw_body: a caller is handing this adapter a bare,
+            # unverifiable dict outside any test harness. Refuse to trust it
+            # rather than silently accepting whatever the caller claims.
+            return None
+
+        raw = activity
 
         # Only process message activities; ignore typing, conversationUpdate, etc.
         if raw.get("type") != "message":

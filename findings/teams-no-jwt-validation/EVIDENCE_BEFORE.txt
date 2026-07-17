@@ -1,0 +1,7 @@
+[1] real owner paired once, as the legitimate flow would leave it: '29:teams-real-owner'
+[2] a *real* (no mock configured) Adapter instance is fed a forged Activity with
+    zero proof of Bot Framework origin (no Authorization header, nothing):
+    on_message(...) -> trust_level='owner_paired', channel_user_id='29:teams-real-owner'
+
+RESULT: VULNERABLE - a forged Activity with no cryptographic proof of Bot Framework origin was accepted and trusted as the real owner.
+exit code: 1
