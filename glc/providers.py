@@ -698,6 +698,7 @@ class GeminiProvider(BaseProvider):
         response_format=None,
         system_blocks=None,
         cache_system=False,
+        agent: str = "",
     ):
         m = model or self.model
         system_text, blocks, has_cache_marker = _flatten_system(system_blocks)
@@ -713,7 +714,7 @@ class GeminiProvider(BaseProvider):
         cache_read_tokens = 0
         if cacheable_text and len(cacheable_text) > 1000:
             cache_name, cache_create_tokens = await self.cache_store.get_or_create(
-                self.api_key, m, cacheable_text, self.base_url
+                self.api_key, m, cacheable_text, self.base_url, agent=agent
             )
             if cache_name and cache_create_tokens == 0:
                 # Reused an existing cache entry — count its tokens as cache_read.
