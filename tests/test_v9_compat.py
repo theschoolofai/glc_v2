@@ -92,3 +92,32 @@ def test_healthz(app_client):
     r = app_client.get("/healthz")
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+def test_docs_disabled_in_production(monkeypatch):
+    import sys
+    import importlib
+    from fastapi.testclient import TestClient
+
+    # Set env to production
+    monkeypatch.setenv("GLC_ENV", "production")
+
+    # Reload glc.main to apply environment changes
+    import glc.main
+    importlib.reload(glc.main)
+
+    client = TestClient(glc.main.app)
+
+    # Ensure docs endpoints are disabled (should return 404)
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+    # Ensure index page does not mention /docs
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "/docs" not in r.text
+
+    # Restore environment and reload to avoid breaking other tests
+    monkeypatch.setenv("GLC_ENV", "development")
+    importlib.reload(glc.main)
