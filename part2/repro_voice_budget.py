@@ -95,10 +95,7 @@ def main() -> int:
             "drive unbounded TTS/STT spend and memory (invariant 8)."
         )
         return 2
-    print(
-        "\nHARDENED: both voice routes now enforce the daily budget and cap "
-        "input size."
-    )
+    print("\nHARDENED: both voice routes now enforce the daily budget and cap input size.")
     return 0
 
 
