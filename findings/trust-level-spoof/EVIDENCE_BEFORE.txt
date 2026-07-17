@@ -1,0 +1,16 @@
+C:\Users\akenn\GitHub\glc_v2\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+[1] isolated config dir: C:\Users\akenn\AppData\Local\Temp\glc-repro-trust-level-spoof-5llz7pa_
+[2] install token (this is what every legitimate adapter also holds): FlB_vHB8...
+[3] confirming 'attacker-never-paired' has never been paired on any channel...
+    pairing_store.lookup('telegram', 'attacker-never-paired') -> None
+[4] opening WS /v1/channels/telegram with the install token, sending an envelope
+    that self-declares trust_level='owner_paired' for the never-paired id...
+    gateway reply: {"error": "dropped: channel 'telegram' is disabled in channels.yaml"}
+[5] re-checking the pairing store for 'attacker-never-paired' (should still be unpaired)...
+    pairing_store.lookup('telegram', 'attacker-never-paired') -> None
+[6] reading the audit log row the gateway wrote for this message...
+    audit_log.trust_level recorded for 'attacker-never-paired' -> 'owner_paired'
+
+RESULT: VULNERABLE - the gateway recorded trust_level='owner_paired' for an identity that was never paired, purely from the client-supplied envelope field.
+exit code: 1

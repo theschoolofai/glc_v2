@@ -28,6 +28,7 @@ from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
+from glc.security.trust_level import classify
 
 router = APIRouter()
 
@@ -65,6 +66,15 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # Invariant 2: never trust a client-declared trust_level. The WS
+            # control channel is the one place every adapter's traffic funnels
+            # through, so anyone who can open this socket (any adapter, or
+            # anyone holding the shared install token) can otherwise self-declare
+            # owner_paired for an identity that was never paired. Recompute it
+            # authoritatively from the pairing store on every message, ignoring
+            # whatever the wire envelope claims.
+            env.trust_level = classify(name, env.channel_user_id)
 
             ok, why = allowed(
                 env.channel,
@@ -144,6 +154,12 @@ async def channel_webhook(name: str, request: Request):
     msg = await adapter.on_message(raw)
     if msg is None:
         return {"status": "ok"}
+
+    # Invariant 2: same rationale as channel_ws — trust_level is a
+    # gateway-reserved authority. Recompute it here too rather than trusting
+    # whatever the adapter's ChannelMessage happened to set, so a compromised
+    # or buggy adapter can never hand itself elevated trust.
+    msg.trust_level = classify(name, msg.channel_user_id)
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
