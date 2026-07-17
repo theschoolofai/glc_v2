@@ -291,7 +291,13 @@ class Adapter(ChannelAdapter):
             base = self.config.get("artifact_public_base") or os.environ.get("GLC_ARTIFACT_PUBLIC_BASE", "")
             if base:
                 sha = ref.removeprefix("art:")
-                return f"{base.rstrip('/')}/{sha}"
+                # Part 2 fix: the /artifacts route now requires a signed token,
+                # so mint a short-lived one and attach it to the MediaUrl Twilio
+                # fetches. Keeps private media unreachable to anonymous callers.
+                from .webhook import sign_artifact_token
+
+                token = sign_artifact_token(sha)
+                return f"{base.rstrip('/')}/{sha}?token={token}"
         return None
 
     async def _download_media(self, url: str) -> bytes:

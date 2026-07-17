@@ -63,7 +63,10 @@ async def test_outbound_art_ref_resolves_via_public_base(mock):
         attachments=[Attachment(kind="image", ref="art:abc123def4560000")],
     )
     await adapter.send(reply)
-    assert mock.send_log[-1].get("MediaUrl") == "https://cdn.example/art/abc123def4560000"
+    # Part 2 hardening: the URL now carries a signed ?token= so Twilio can
+    # fetch it while anonymous callers are refused.
+    url = mock.send_log[-1].get("MediaUrl")
+    assert url.startswith("https://cdn.example/art/abc123def4560000?token=")
 
 
 async def test_outbound_unresolvable_art_ref_is_skipped_not_dropped(mock):

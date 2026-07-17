@@ -101,20 +101,34 @@ def test_skip_sig_env_bypasses_verification(monkeypatch):
     assert len(seen) == 1
 
 
-def test_artifact_route_serves_stored_bytes():
+def test_artifact_route_serves_stored_bytes_with_signed_token():
+    from glc.channels.catalogue.twilio_sms.webhook import sign_artifact_token
+
     client, _ = _client_and_seen()
     ref = artifacts.put(b"\xff\xd8\xff jpeg", content_type="image/jpeg")
     sha = ref.removeprefix("art:")
 
-    resp = client.get(f"/artifacts/{sha}")
+    # A gateway-minted signed token is required (Part 2 hardening).
+    token = sign_artifact_token(sha)
+    resp = client.get(f"/artifacts/{sha}?token={token}")
 
     assert resp.status_code == 200
     assert resp.content == b"\xff\xd8\xff jpeg"
     assert resp.headers["content-type"].startswith("image/jpeg")
 
 
-def test_artifact_route_404_for_unknown_or_bad_sha():
+def test_artifact_route_rejects_anonymous_read():
+    """Part 2 hardening: no token -> 403, even for a valid stored sha."""
     client, _ = _client_and_seen()
-    assert client.get("/artifacts/deadbeefdeadbeef").status_code == 404
-    # Traversal / non-hex shas resolve to None via the store's _validate_ref.
-    assert client.get("/artifacts/notavalidsha").status_code == 404
+    ref = artifacts.put(b"\xff\xd8\xff jpeg", content_type="image/jpeg")
+    sha = ref.removeprefix("art:")
+
+    assert client.get(f"/artifacts/{sha}").status_code == 403
+    assert client.get(f"/artifacts/{sha}?token=bogus.deadbeef").status_code == 403
+
+
+def test_artifact_route_403_for_unknown_or_bad_sha():
+    client, _ = _client_and_seen()
+    # Auth is checked before existence, so unauthenticated probes get 403.
+    assert client.get("/artifacts/deadbeefdeadbeef").status_code == 403
+    assert client.get("/artifacts/notavalidsha").status_code == 403
