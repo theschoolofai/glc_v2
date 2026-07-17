@@ -1,15 +1,16 @@
 """WS /v1/channels/{name} — adapter control plane.
 
 Adapters connect over WebSocket and exchange JSON-serialised
-ChannelMessage and ChannelReply envelopes. The connection is gated by
-the installation token presented in the Authorization header (Sec-Websocket
-clients can pass it as a query string fallback, ?token=...).
+ChannelMessage and ChannelReply envelopes. The connection is gated by the
+*adapter secret* (a credential distinct from the admin/control token and the
+gateway key — see Leak 1). The legacy ``?token=`` query-string fallback is
+disabled by default because it leaks the secret into proxy and server logs.
 
-This endpoint is the contract surface adapters speak to. The gateway
-processes incoming messages through the rate limiter, allowlist,
-trust-level classifier, policy engine, and (eventually) the agent
-runtime. For S11 the agent runtime is a stub that echoes the message
-back so adapter authors can verify their wire is plumbed correctly.
+The gateway is the authority on channel identity: every inbound envelope is run
+through ``guard_channel_message``, which re-derives the trust level from the
+pairing store and rejects adapter-asserted escalation (Leak 9). Inbound traffic
+is processed through the rate limiter, allowlist and trust classifier before
+the (stub) agent runtime.
 """
 
 from __future__ import annotations
@@ -24,24 +25,40 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from glc.audit import append as audit_append
 from glc.channels import registry
 from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
+from glc.security.auth import get_adapter_secret
+from glc.security.envelope_guard import guard_channel_message
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
+from glc.security.settings import get_settings
 
 router = APIRouter()
 
 
-@router.websocket("/v1/channels/{name}")
-async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+def _ws_authenticate(websocket: WebSocket, token: str | None) -> bool:
+    """Leak 1 / 4: adapters prove possession of the *adapter secret*, which is
+    distinct from the admin/control token and the gateway key. The legacy
+    ``?token=`` query-param fallback is disabled by default because it leaks
+    the secret into proxy/server logs."""
+    expected = get_adapter_secret()
+    if not expected:
+        # Misconfiguration: no adapter secret provisioned. Refuse all adapters
+        # rather than falling back to a weaker credential.
+        return False
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
-    elif token:
+    elif token and get_settings().ws_allow_query_token:
         presented = token
-    expected = get_or_create_install_token()
-    if presented != expected:
+    import hmac
+
+    return bool(presented) and hmac.compare_digest(presented, expected)
+
+
+@router.websocket("/v1/channels/{name}")
+async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+    if not _ws_authenticate(websocket, token):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -66,6 +83,27 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            # Leak 9: the gateway — not the adapter — is the authority on
+            # identity. Re-derive the trust level from the pairing store and
+            # reject any adapter-asserted escalation. Failed spoof attempts are
+            # audited.
+            guard = guard_channel_message(env)
+            if guard.spoof_detected:
+                audit_append(
+                    channel=env.channel,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=guard.authoritative_trust,
+                    event_type="spoof_attempt",
+                    result={
+                        "reason": guard.reason,
+                        "claimed_trust_level": guard.claimed_trust,
+                    },
+                )
+                await websocket.send_text(
+                    json.dumps({"error": "channel identity spoof rejected"})
+                )
+                continue
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
@@ -77,7 +115,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 audit_append(
                     channel=env.channel,
                     channel_user_id=env.channel_user_id,
-                    trust_level=env.trust_level,
+                    trust_level=guard.authoritative_trust,
                     event_type="allowlist_drop",
                     result={"reason": why},
                 )
@@ -89,7 +127,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 audit_append(
                     channel=env.channel,
                     channel_user_id=env.channel_user_id,
-                    trust_level=env.trust_level,
+                    trust_level=guard.authoritative_trust,
                     event_type="rate_limit",
                     result={"reason": why},
                 )
@@ -99,7 +137,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             audit_append(
                 channel=env.channel,
                 channel_user_id=env.channel_user_id,
-                trust_level=env.trust_level,
+                trust_level=guard.authoritative_trust,
                 event_type="inbound_message",
                 params={"text": env.text, "thread_id": env.thread_id},
             )
