@@ -55,6 +55,11 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
     owners = [p.channel_user_id for p in pairings.owners(channel=name)]
+    # Stable for this connection's lifetime; scopes the new-identity cap
+    # below so rotating channel_user_id can't be used to defeat
+    # check_message's per-identity window (see
+    # findings/rate-limiter-identity-rotation/).
+    connection_id = f"{name}:{id(websocket)}"
 
     try:
         while True:
@@ -96,6 +101,18 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"status": 429, "error": why}))
                 continue
 
+            ok, why = limiter.check_new_identity(connection_id, env.channel_user_id)
+            if not ok:
+                audit_append(
+                    channel=env.channel,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="rate_limit",
+                    result={"reason": why},
+                )
+                await websocket.send_text(json.dumps({"status": 429, "error": why}))
+                continue
+
             audit_append(
                 channel=env.channel,
                 channel_user_id=env.channel_user_id,
@@ -116,6 +133,8 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             await websocket.send_text(reply.model_dump_json())
     except WebSocketDisconnect:
         return
+    finally:
+        limiter.release_connection(connection_id)
 
 
 @router.get("/v1/channels/{name}/webhook")
@@ -167,6 +186,21 @@ async def channel_webhook(name: str, request: Request):
         return {"status": "ok"}
 
     ok, why = limiter.check_message(msg.channel, msg.channel_user_id)
+    if not ok:
+        audit_append(
+            channel=msg.channel,
+            channel_user_id=msg.channel_user_id,
+            trust_level=msg.trust_level,
+            event_type="rate_limit",
+            result={"reason": why},
+        )
+        return JSONResponse(status_code=429, content={"error": why})
+
+    # Source IP stands in for "connection" on this stateless HTTP path --
+    # see the matching comment in channel_ws and
+    # findings/rate-limiter-identity-rotation/.
+    source_ip = request.client.host if request.client else "unknown"
+    ok, why = limiter.check_new_identity(f"{name}:{source_ip}", msg.channel_user_id)
     if not ok:
         audit_append(
             channel=msg.channel,
