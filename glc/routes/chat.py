@@ -830,4 +830,7 @@ async def routers(request: Request):
 
 @router.get("/v1/calls")
 async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
+    # NEW-BUG-1 FIX: Validate limit parameter at endpoint level
+    if limit < 1 or limit > 10000:
+        raise HTTPException(400, f"limit must be between 1 and 10000, got {limit}")
     return db.recent(limit=limit, provider=provider, status=status)
