@@ -1,0 +1,9 @@
+C:\Users\akenn\GitHub\glc_v2\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+[1] confirming DISCORD_VERIFY_TOKEN is not set: False (should be False)
+[2] GET /v1/channels/discord/webhook?hub.mode=subscribe&hub.verify_token=&hub.challenge=pwned-challenge-12345
+    status: 200
+    body:   'pwned-challenge-12345'
+
+RESULT: VULNERABLE - the handshake completed and echoed the attacker's challenge for 'discord', a channel whose verify token was never configured.
+exit code: 1
