@@ -5,8 +5,9 @@
 # Match semantics:
 #   - tool / channel / trust_level: "*" matches anything; otherwise literal
 #   - condition.path_glob:    fnmatch glob against the tool's `path` param
-#   - condition.command_matches: substring match against `command` param;
-#                                accepts a list of patterns (any-match)
+#   - condition.command_matches: case-insensitive substring match against
+#                                `command` param; accepts a list of patterns
+#                                (any-match)
 #   - condition.recipient_type:  literal match against the param
 #
 # Evaluation: first matching rule wins. Ties resolve to deny.

@@ -65,7 +65,8 @@ def _matches_condition(condition: dict[str, Any], params: dict[str, Any]) -> boo
             if not isinstance(cmd, str):
                 return False
             patterns = expected if isinstance(expected, list) else [expected]
-            if not any(p in cmd for p in patterns):
+            cmd_folded = cmd.casefold()
+            if not any(isinstance(p, str) and p.casefold() in cmd_folded for p in patterns):
                 return False
         elif key == "recipient_type":
             if params.get("recipient_type") != expected:

@@ -96,6 +96,44 @@ def test_command_matches_list():
     assert v.action == "deny"
 
 
+def test_command_matches_is_case_insensitive():
+    """Deny-list patterns must match regardless of command casing.
+
+    Without casefold, ``SUDO ls`` slips past a ``sudo`` deny rule and
+    falls through to default-allow for owner_paired.
+    """
+    eng = _engine(
+        [
+            PolicyRule(
+                tool="shell.exec",
+                condition={"command_matches": ["sudo", "rm -rf", "curl | sh"]},
+                action="deny",
+                reason="command pattern is on the shell deny list",
+            ),
+        ]
+    )
+    ctx = {"channel": "x", "trust_level": "owner_paired"}
+    for cmd in ("sudo ls", "SUDO ls", "SuDo apt-get update", "RM -RF /"):
+        v = eng.evaluate({"name": "shell.exec", "arguments": {"command": cmd}}, ctx)
+        assert v.action == "deny", f"expected deny for {cmd!r}, got {v.action}"
+    allow = eng.evaluate(
+        {"name": "shell.exec", "arguments": {"command": "echo hello"}},
+        ctx,
+    )
+    assert allow.action == "allow"
+
+
+def test_packaged_policy_denies_cased_sudo():
+    from glc.config import PACKAGED_POLICY
+
+    eng = PolicyEngine.from_yaml(PACKAGED_POLICY)
+    v = eng.evaluate(
+        {"name": "shell.exec", "arguments": {"command": "SUDO apt install x"}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v.action == "deny"
+
+
 def test_untrusted_wildcard_deny():
     eng = _engine(
         [
