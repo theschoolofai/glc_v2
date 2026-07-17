@@ -130,6 +130,38 @@ async def channel_webhook_verify(name: str, request: Request):
     raise HTTPException(status_code=403)
 
 
+# The webhook is the gateway's one unauthenticated surface -- Meta and Twilio
+# POST to it without a bearer token, so it cannot require one. That makes the
+# size of what it will buffer an access-control decision in its own right.
+# Platform webhook payloads are kilobytes of JSON (media arrives as URLs, not
+# inline), so 1 MiB is generous. Raise it if a platform needs more.
+MAX_WEBHOOK_BODY_BYTES = int(os.getenv("GLC_MAX_WEBHOOK_BODY_BYTES", str(1024 * 1024)))
+
+
+async def _read_body_capped(request: Request, limit: int) -> bytes:
+    """Read the body, refusing to buffer more than `limit` bytes.
+
+    request.body() reads everything with no limit, and it runs before the
+    adapter -- so it must not be used here: an adapter's signature check cannot
+    protect memory that was already allocated to read the payload it is about
+    to reject. The stream is capped as it arrives; content-length is checked
+    first as a cheap early out, but it is only a hint and is never trusted on
+    its own.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail=f"webhook body exceeds {limit} bytes")
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(status_code=413, detail=f"webhook body exceeds {limit} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/v1/channels/{name}/webhook")
 async def channel_webhook(name: str, request: Request):
     try:
@@ -138,7 +170,10 @@ async def channel_webhook(name: str, request: Request):
         raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
 
     raw = {
-        "raw_body": await request.body(),
+        # Bounded before the adapter -- and therefore before any signature
+        # check -- because that is the only point at which the allocation can
+        # still be refused.
+        "raw_body": await _read_body_capped(request, MAX_WEBHOOK_BODY_BYTES),
         "headers": dict(request.headers),
     }
     msg = await adapter.on_message(raw)
