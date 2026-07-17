@@ -24,8 +24,18 @@ DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 
 def _resolve_path() -> str:
     """Resolve at call time, not import time, so tests that swap the env
-    var see the change."""
-    return os.getenv("GLC_AUDIT_DB", str(DEFAULT_DIR / "audit.sqlite"))
+    var see the change.
+
+    Prefer ``GLC_AUDIT_DB`` when set. Otherwise place the DB under
+    ``GLC_CONFIG_DIR`` (same contract as the install token / Modal volume),
+    not a hard-coded ``~/.glc`` — otherwise Modal scale-to-zero wipes the
+    forensic trail while the volume only keeps the token.
+    """
+    explicit = os.getenv("GLC_AUDIT_DB")
+    if explicit:
+        return explicit
+    config_dir = Path(os.getenv("GLC_CONFIG_DIR", str(DEFAULT_DIR)))
+    return str(config_dir / "audit.sqlite")
 
 
 @contextmanager
