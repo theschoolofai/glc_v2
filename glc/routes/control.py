@@ -2,7 +2,9 @@
 /v1/control/pair/confirm, /v1/control/presence.
 
 All endpoints require the installation token (Authorization: Bearer ...).
-The kill endpoint binds 127.0.0.1 only; the host check is enforced here.
+The kill endpoint is restricted to a *direct* loopback client; reverse
+proxies (Modal ASGI, nginx, etc.) make every peer look like 127.0.0.1, so
+forwarded-proxy signals fail closed unless GLC_KILL_ALLOW_REMOTE=1.
 """
 
 from __future__ import annotations
@@ -27,6 +29,26 @@ def _require_token(authorization: str | None) -> None:
     presented = authorization.removeprefix("Bearer ").strip()
     if presented != expected:
         raise HTTPException(403, "install token mismatch")
+
+
+def _is_direct_loopback(request: Request) -> bool:
+    """True only when the TCP peer is loopback *and* not a reverse proxy.
+
+    Behind Modal's ``@modal.asgi_app()`` (and most reverse proxies) the ASGI
+    ``request.client.host`` is ``127.0.0.1`` for every public request. Trusting
+    that alone would make the remote-kill gate a no-op. Treat proxy / Modal
+    signals as non-loopback so kill stays opt-in via ``GLC_KILL_ALLOW_REMOTE``.
+    """
+    if os.getenv("GLC_BEHIND_PROXY") == "1":
+        return False
+    # Modal sets MODAL_TASK_ID in container runtimes.
+    if os.getenv("MODAL_TASK_ID"):
+        return False
+    headers = request.headers
+    if headers.get("x-forwarded-for") or headers.get("x-forwarded-proto") or headers.get("forwarded"):
+        return False
+    client_host = request.client.host if request.client else ""
+    return client_host in ("127.0.0.1", "::1", "localhost")
 
 
 class PairRequest(BaseModel):
@@ -100,10 +122,11 @@ async def presence(request: Request, authorization: str | None = Header(default=
 async def kill(request: Request, authorization: str | None = Header(default=None)):
     _require_token(authorization)
     client_host = request.client.host if request.client else "unknown"
-    if os.getenv("GLC_KILL_ALLOW_REMOTE") != "1" and client_host not in ("127.0.0.1", "::1", "localhost"):
+    if os.getenv("GLC_KILL_ALLOW_REMOTE") != "1" and not _is_direct_loopback(request):
         raise HTTPException(
             403,
-            f"kill is restricted to loopback (got {client_host}). "
+            f"kill is restricted to direct loopback (got peer={client_host!r}; "
+            "proxied/Modal peers are not treated as loopback). "
             "Set GLC_KILL_ALLOW_REMOTE=1 to override (not recommended).",
         )
     # Send SIGTERM to ourselves shortly after returning so the client gets a 200.
