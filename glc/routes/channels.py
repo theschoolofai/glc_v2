@@ -125,6 +125,18 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
+    # An unset verify token defaulted to "", and hmac.compare_digest("", "") is
+    # True -- so any channel the operator had not configured would accept an
+    # empty hub.verify_token from anyone and echo the challenge back. The
+    # comparison was never the problem; treating "no secret configured" as "the
+    # secret is the empty string" was. Absence of a credential must not be
+    # usable AS a credential: a channel with no verify token cannot verify
+    # anything, so refuse before comparing.
+    if not expected:
+        raise HTTPException(
+            status_code=403,
+            detail=f"channel {name!r} has no {name.upper()}_VERIFY_TOKEN configured",
+        )
     if mode == "subscribe" and hmac.compare_digest(token, expected):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403)
