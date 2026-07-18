@@ -39,8 +39,13 @@ def store(data: bytes, filename: str = "") -> str:
     if not artifact_path.exists():
         artifact_path.write_bytes(data)
 
+        # `filename` comes from an untrusted attachment header and is written
+        # into a line-oriented control file. Strip CR/LF so a crafted name can't
+        # inject extra lines (e.g. a fake `created=` that would defeat the TTL
+        # check in cleanup_expired).
+        safe_filename = filename.replace("\r", " ").replace("\n", " ")
         meta_path = artifact_dir / f"{sha}.meta"
-        meta_path.write_text(f"filename={filename}\nsize={len(data)}\ncreated={time.time()}\n")
+        meta_path.write_text(f"filename={safe_filename}\nsize={len(data)}\ncreated={time.time()}\n")
 
     return ref
 
