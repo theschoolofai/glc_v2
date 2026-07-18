@@ -341,6 +341,30 @@ def _validate_structured(text: str, schema: dict):
     return obj
 
 
+def _safe_assistant_content(text: str, max_chars: int = 1000) -> str:
+    """Extract only the outermost JSON object/array from raw LLM output.
+
+    The structured-output retry call places the prior LLM reply in the
+    assistant role so the model can self-correct. If that reply contains
+    injected instructions *outside* the JSON braces, those instructions
+    reach the retry call verbatim — a prompt-injection amplification path.
+
+    This helper discards everything outside the first { ... } or [ ... ]
+    pair and hard-caps the result, giving the model only the JSON fragment
+    it needs to self-correct while stripping any surrounding narrative or
+    injected directives.
+    """
+    text = text.strip()
+    start = next((i for i, c in enumerate(text) if c in ("{", "[")), None)
+    if start is not None:
+        end_brace = text.rfind("}")
+        end_bracket = text.rfind("]")
+        end = max(end_brace, end_bracket)
+        if end > start:
+            text = text[start : end + 1]
+    return text[:max_chars]
+
+
 # ─────────────────────────── routes ───────────────────────────
 
 
@@ -514,12 +538,16 @@ async def chat(req: ChatRequest, request: Request):
             if req.response_format and req.response_format.schema_ and not result["tool_calls"]:
                 try:
                     parsed = _validate_structured(result["text"], req.response_format.schema_)
-                except (ValueError, ValidationError) as ve:
+                except (ValueError, ValidationError):
+                    # Sanitise the assistant turn before reinsertion: extract only the
+                    # JSON fragment to strip any injected instructions that may appear
+                    # outside the braces in the model's output (LLM01 / AML.T0051).
                     fix_msgs = list(messages) + [
-                        {"role": "assistant", "content": result["text"]},
+                        {"role": "assistant", "content": _safe_assistant_content(result["text"])},
                         {
                             "role": "user",
-                            "content": f"Your previous reply did not match the required JSON schema: {ve}. Reply ONLY with valid JSON conforming to the schema.",
+                            "content": "Your previous reply did not match the required JSON schema. "
+                            "Reply ONLY with valid JSON that conforms to the schema, with no surrounding text.",
                         },
                     ]
                     result = await provider.chat(
@@ -535,6 +563,7 @@ async def chat(req: ChatRequest, request: Request):
                         parsed = _validate_structured(result["text"], req.response_format.schema_)
                     except (ValueError, ValidationError) as ve2:
                         raise HTTPException(503, f"structured output failed validation: {ve2}")
+
 
             tokens = (result["input_tokens"] or 0) + (result["output_tokens"] or 0)
             rtr.state[name].tokens_today += tokens
