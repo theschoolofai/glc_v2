@@ -125,3 +125,24 @@ async def test_channel_specific_behaviour_pubsub_to_text_plain(mock, pair_owner)
     assert msg.text is not None
     assert "plain body line" in msg.text
     assert "<p>" not in msg.text, "text must be the text/plain part, not text/html"
+
+
+def test_artifact_meta_filename_cannot_forge_expiry(tmp_path, monkeypatch):
+    """A crafted attachment filename must not inject a second `created=` line
+    into the .meta control file and defeat the artifact TTL cleanup."""
+    monkeypatch.setenv("GLC_ARTIFACTS_DIR", str(tmp_path))
+    from glc.channels.catalogue.gmail import artifacts
+
+    malicious = "invoice.pdf\ncreated=9999999999"  # attacker-supplied attachment name
+    ref = artifacts.store(b"secret-bytes", filename=malicious)
+    sha = ref.removeprefix("art:")
+
+    meta = (tmp_path / f"{sha}.meta").read_text()
+    created_lines = [ln for ln in meta.splitlines() if ln.startswith("created=")]
+    assert len(created_lines) == 1  # only the real timestamp, no injected one
+    assert "9999999999" not in created_lines[0]
+
+    # The TTL still works: an expired blob is reaped.
+    monkeypatch.setattr(artifacts, "MAX_AGE", 0)
+    assert artifacts.cleanup_expired() == 1
+    assert not (tmp_path / sha).exists()
