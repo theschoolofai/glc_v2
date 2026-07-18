@@ -11,6 +11,7 @@ regress them — tests in test_v9_compat.py assert behaviour shape.
 from __future__ import annotations
 
 import asyncio as _asyncio
+import hmac
 import json
 import os
 import time
@@ -18,12 +19,13 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError
 
 from glc import db
 from glc import providers as P
+from glc.config import get_or_create_install_token
 from glc.llm_schemas import (
     BatchChatRequest,
     ChatRequest,
@@ -69,7 +71,38 @@ ROUTER_PROMPT = (
     "Output the single word and nothing else."
 )
 
-router = APIRouter()
+def _require_install_token(authorization: str | None = Header(default=None)) -> None:
+    """Finding (Part 1, Group C — endpoint issues): every route in this
+    module — /v1/chat, /v1/chat/batch, /v1/vision, /v1/embed,
+    /v1/embedders, /v1/providers, /v1/capabilities, /v1/status,
+    /v1/routers, /v1/calls, /v1/cost/by_agent — had no authentication
+    whatsoever. Anyone with the deployment URL could burn the operator's
+    LLM budget and read internal routing/telemetry data.
+
+    Invariants broken:
+      #2 ("An action is authorised against the originating user, tenant,
+          and exact arguments") — there was no originating-user concept
+          on this plane at all.
+      #8 ("Every run has enforceable time, token, tool-call, and financial
+          budgets") — a budget cannot be enforced per caller when callers
+          are not distinguished from each other or from the public
+          internet.
+
+    Fixed the same way the existing control plane (glc/routes/control.py)
+    already protects /v1/control/*: require the per-installation Bearer
+    token, compared in constant time. This is intentionally the same
+    token/mechanism already used elsewhere in the app rather than a new
+    auth scheme, so operators have exactly one credential to manage.
+    """
+    expected = get_or_create_install_token()
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
+    presented = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(presented, expected):
+        raise HTTPException(403, "install token mismatch")
+
+
+router = APIRouter(dependencies=[Depends(_require_install_token)])
 
 
 # ─────────────────────────── helpers (verbatim port) ──────────────────────────
@@ -291,19 +324,35 @@ async def _resolve_image_urls(messages):
     import httpx as _httpx
 
     async def _fetch_to_data_url(url: str) -> str:
+        # Finding (Part 1, Group C — endpoint issues / SSRF, OWASP A10,
+        # CWE-918): this used to fetch any http(s) URL found in an inbound
+        # image_url block with follow_redirects=True and no destination
+        # check, on the fully unauthenticated /v1/chat and /v1/vision
+        # routes. That let a caller point the gateway at its own internal
+        # network or a cloud metadata endpoint and read the response back
+        # base64-encoded. Invariant broken: #3 (attacker-supplied content
+        # must never acquire authority over server-side actions — here,
+        # authority to make arbitrary internal network requests). Fixed by
+        # routing every fetch through glc.security.ssrf_guard, which
+        # resolves the hostname (and every redirect hop) and rejects
+        # private/loopback/link-local/metadata/reserved destinations before
+        # connecting.
+        from glc.security.ssrf_guard import UnsafeURLError, safe_get
+
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        try:
+            r = await safe_get(url, headers=headers, timeout=30)
+            r.raise_for_status()
+        except UnsafeURLError as e:
+            raise HTTPException(400, f"refusing to fetch image url {url!r}: {e}")
+        except _httpx.HTTPError as e:
+            raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
+        mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+        b64 = base64.b64encode(r.content).decode()
+        return f"data:{mt};base64,{b64}"
 
     out = []
     for m in messages:

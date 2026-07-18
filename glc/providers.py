@@ -763,9 +763,24 @@ class GeminiProvider(BaseProvider):
                 body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": _GEMINI_BUDGETS[reasoning]}
                 reasoning_applied = True
 
-        url = f"{self.base_url}/models/{m}:generateContent?key={self.api_key}"
+        # Finding (Part 1, Section 7 code leak): the API key used to be sent
+        # as a `?key=...` query-string parameter. Query strings are far more
+        # likely than headers to end up somewhere they shouldn't: this
+        # process's own HTTP access logs, any intermediary/reverse proxy log
+        # (Modal's included), httpx's debug/redirect handling, and the
+        # ProviderError above which echoes `r.text[:400]` — some upstream
+        # error bodies from Google's edge include the full requested URL,
+        # which would have put the live key into our own audit trail.
+        # Invariant #1 ("An adapter can never obtain an upstream provider
+        # credential") is about adapters specifically, but the same
+        # credential-handling discipline applies here: a secret must not be
+        # placed anywhere more visible than the minimum required channel.
+        # Google's API accepts the key via the `x-goog-api-key` header as a
+        # documented alternative to the query parameter; use that instead.
+        url = f"{self.base_url}/models/{m}:generateContent"
+        headers = {"x-goog-api-key": self.api_key}
         async with httpx.AsyncClient(timeout=180) as c:
-            r = await c.post(url, json=body)
+            r = await c.post(url, json=body, headers=headers)
             if r.status_code != 200:
                 # Retry stripping thinkingConfig / cachedContent on 400.
                 if r.status_code == 400:
@@ -778,7 +793,7 @@ class GeminiProvider(BaseProvider):
                             body["systemInstruction"] = {"parts": [{"text": system_text}]}
                         cache_name = None
                         cache_read_tokens = 0
-                    r = await c.post(url, json=body)
+                    r = await c.post(url, json=body, headers=headers)
                 if r.status_code != 200:
                     raise ProviderError(
                         f"gemini HTTP {r.status_code}: {r.text[:400]}",

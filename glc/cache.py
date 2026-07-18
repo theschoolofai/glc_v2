@@ -46,7 +46,12 @@ class GeminiCache:
                 self._store.pop(key, None)
 
         # Mint a new cached content. Gemini requires the content list.
-        url = f"{base_url}/cachedContents?key={api_key}"
+        # Finding (Part 1, Section 7 code leak): same class as the fix in
+        # glc/providers.py's GeminiProvider — the key must go in the
+        # x-goog-api-key header, not the URL, so it can't end up in access
+        # logs or a proxy's request log.
+        url = f"{base_url}/cachedContents"
+        headers = {"x-goog-api-key": api_key}
         body = {
             "model": f"models/{model}",
             "contents": [{"role": "user", "parts": [{"text": text}]}],
@@ -54,7 +59,7 @@ class GeminiCache:
         }
         try:
             async with httpx.AsyncClient(timeout=60) as c:
-                r = await c.post(url, json=body)
+                r = await c.post(url, json=body, headers=headers)
                 if r.status_code != 200:
                     return None, 0
                 d = r.json()

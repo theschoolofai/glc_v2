@@ -15,12 +15,34 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 CODE_TTL_SECONDS = 5 * 60
+
+# Finding (Part 1, Section 7 code leak): pairing codes are 6 digits
+# (1,000,000 possibilities) with a 5-minute TTL and confirm_code() had no
+# limit on failed guesses. /v1/control/pair/confirm currently sits behind
+# the installation token, so this isn't remotely exploitable by an
+# anonymous caller today — but relying on that alone is fragile (any
+# future self-serve/DM-triggered confirm path, or a second caller who
+# holds the install token but shouldn't be able to hijack an *unrelated*
+# pending pairing, would reopen it), and a security-sensitive lookup
+# should not be brute-forceable on its own merits. Invariant #2 ("an
+# action is authorised against the originating user... and exact
+# arguments") — a guessed code lets someone act as a channel_user_id they
+# never proved control over. Fix: a global sliding-window throttle on
+# failed confirm attempts, independent of the per-endpoint auth gate.
+MAX_FAILED_CONFIRM_ATTEMPTS = 20
+FAILED_ATTEMPT_WINDOW_SECONDS = CODE_TTL_SECONDS
+
+
+class PairingLockedOut(Exception):
+    """Raised by confirm_code() when too many failed guesses have been made
+    in the current window — a defense-in-depth brute-force guard."""
 
 
 def _resolve_path() -> str:
@@ -51,6 +73,7 @@ class PairingRecord:
 class PairingStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._failed_attempts: deque[float] = deque()
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -95,16 +118,37 @@ class PairingStore:
             )
         return code, expires_at
 
+    def _record_failed_attempt_and_maybe_lock(self) -> None:
+        now = time.time()
+        with self._lock:
+            while self._failed_attempts and self._failed_attempts[0] < now - FAILED_ATTEMPT_WINDOW_SECONDS:
+                self._failed_attempts.popleft()
+            self._failed_attempts.append(now)
+
+    def _check_not_locked_out(self) -> None:
+        now = time.time()
+        with self._lock:
+            while self._failed_attempts and self._failed_attempts[0] < now - FAILED_ATTEMPT_WINDOW_SECONDS:
+                self._failed_attempts.popleft()
+            if len(self._failed_attempts) >= MAX_FAILED_CONFIRM_ATTEMPTS:
+                raise PairingLockedOut(
+                    f"too many failed pairing confirmations "
+                    f"({MAX_FAILED_CONFIRM_ATTEMPTS} in {FAILED_ATTEMPT_WINDOW_SECONDS}s); try again later"
+                )
+
     def confirm_code(self, code: str) -> PairingRecord | None:
+        self._check_not_locked_out()
         with _conn() as c:
             row = c.execute(
                 "SELECT * FROM pending_codes WHERE code=?",
                 (code,),
             ).fetchone()
             if row is None:
+                self._record_failed_attempt_and_maybe_lock()
                 return None
             if row["expires_at"] < time.time():
                 c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
+                self._record_failed_attempt_and_maybe_lock()
                 return None
             paired_at = time.time()
             c.execute(

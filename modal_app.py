@@ -51,6 +51,31 @@ data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
 # separately with `modal secret create glc-llm-keys ...` (mock values for now).
 llm_secret = modal.Secret.from_name("glc-llm-keys")
 
+# ─────────────────────────── OPEN FINDING — not fixed this pass ───────────────
+# The whole gateway (chat/data-plane routes AND every channel adapter) runs in
+# this one @app.function's single container, with every provider key in
+# llm_secret injected into that single process's environment. Nothing in the
+# current adapter code reads these keys directly (verified: no
+# glc/channels/catalogue/**/*.py imports glc.providers or reads
+# GEMINI_API_KEY/GROQ_API_KEY/etc.) — so Invariant #1 ("An adapter can never
+# obtain an upstream provider credential") holds at the *application-code*
+# level today. But it does not hold at the *deployment* level: if any adapter
+# were compromised via RCE (a real risk surface — adapters parse
+# attacker-controlled webhook bodies), the attacker would be running inside
+# the same process, same container, same environment as the provider keys and
+# could read them directly regardless of what the Python source does. There is
+# also no network egress filter, so a compromised adapter could exfiltrate
+# those keys or reach internal/metadata addresses freely.
+# The real fix is the one docs/ARCHITECTURE.md describes as the actual
+# assignment: split this into per-component Modal functions/containers (data
+# plane vs. each channel adapter) so a compromised adapter's container never
+# has the llm_secret attached, plus a Modal egress allowlist. That is a
+# multi-file redeploy-and-test change to the container topology itself, and
+# per this session's explicit scope (Modal deployment/redeploy is out of
+# scope for this pass), it is being left as a documented, NOT-fixed finding
+# rather than an untested, unverifiable refactor. See FINDINGS.md.
+# ────────────────────────────────────────────────────────────────────────────
+
 
 @app.function(
     image=image,
