@@ -632,3 +632,14 @@ async def test_no_event_hook_is_a_noop(mock, owner_paired):
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message(_start_event(STREAM_SID, OWNER_ID, "owner"))
     assert isinstance(msg, ChannelMessage)
+
+
+async def test_outbound_caller_id_cannot_inject_twiml(mock, owner_paired):
+    """A double-quote in the caller id must not break out of the TwiML attribute
+    and inject its own verbs (e.g. <Dial> for call redirection / toll fraud)."""
+    evil = '+1"/><Dial>sip:attacker@evil.example</Dial><Parameter value="'
+    adapter = Adapter(config={"mock": mock})
+    await adapter.send(ChannelReply(channel="twilio_voice", channel_user_id=evil, text="hi"))
+    twiml = mock.send_log[0]["twiml"]
+    assert "<Dial>" not in twiml  # injected verb must not reach the wire as markup
+    assert "&lt;Dial&gt;" in twiml  # it survives only as inert, escaped text

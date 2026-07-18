@@ -22,7 +22,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 from pydantic import ValidationError
 
@@ -425,13 +425,17 @@ class Adapter(ChannelAdapter):
         # stream's `start` frame — that's how the caller-less media stream
         # learns whose audio it is. <Connect> must be immediately followed by
         # <Stream> so Twilio opens the bidirectional Media Streams WebSocket.
-        caller = escape(reply.channel_user_id)
+        #
+        # Use quoteattr() (not escape()) for attribute values: it supplies the
+        # surrounding quotes AND escapes quote characters, so a caller id / URL
+        # containing a double quote cannot break out of the attribute and inject
+        # its own TwiML verbs (e.g. <Dial>).
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
             "<Response>"
             f"{say}"
-            f'<Connect><Stream url="{escape(stream_url)}">'
-            f'<Parameter name="caller" value="{caller}"/>'
+            f"<Connect><Stream url={quoteattr(stream_url)}>"
+            f'<Parameter name="caller" value={quoteattr(reply.channel_user_id)}/>'
             "</Stream></Connect>"
             "</Response>"
         )
