@@ -66,6 +66,10 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            if env.channel != name:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
