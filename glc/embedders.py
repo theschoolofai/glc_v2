@@ -165,10 +165,11 @@ class GeminiEmbedder(EmbeddingProvider):
         self.state = EmbedRateState(rpm=rpm, cooldown=cooldown)
 
     async def embed(self, text: str, task_type: TaskType) -> dict:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/"
-            f"models/{self.model}:embedContent?key={self.api_key}"
-        )
+        # Finding (Part 1, Section 7 code leak): same class as the fix in
+        # glc/providers.py's GeminiProvider — key goes in the x-goog-api-key
+        # header, not the URL query string.
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:embedContent"
+        headers = {"x-goog-api-key": self.api_key}
         body = {
             "model": f"models/{self.model}",
             "content": {"parts": [{"text": text}]},
@@ -176,7 +177,7 @@ class GeminiEmbedder(EmbeddingProvider):
             "outputDimensionality": self.output_dim,
         }
         async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.post(url, json=body)
+            r = await c.post(url, json=body, headers=headers)
         if r.status_code != 200:
             raise EmbedderError(f"gemini HTTP {r.status_code}: {r.text[:200]}", status=r.status_code)
         d = r.json()
