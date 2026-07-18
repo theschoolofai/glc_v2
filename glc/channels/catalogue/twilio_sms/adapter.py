@@ -343,10 +343,70 @@ class Adapter(ChannelAdapter):
         return None
 
     async def _download_media(self, url: str) -> bytes:
-        """Download Twilio-hosted MMS media using Basic Auth."""
+        """Download Twilio-hosted MMS media using Basic Auth.
+
+        *** Part 2 finding — new bug, not in Session 12 Section 6/7 ***
+
+        Bug: this used to fetch `url` with no validation at all and attach
+        this deployment's live TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN as HTTP
+        Basic Auth to whatever host `url` pointed at. `url` is
+        `item.url`, read straight from an inbound webhook's MediaUrl0,
+        MediaUrl1, ... fields (see on_message() -> form.media_items()) --
+        i.e. content carried inside an inbound message. The request carrying
+        that field is Twilio-signature-verified (glc/channels/catalogue/
+        twilio_sms/webhook.py::validate_signature, wired into on_message() by
+        a separate, already-landed fix in this same file), which proves
+        Twilio's servers sent this exact form body -- but signature
+        verification says nothing about what the *value* of MediaUrl0 is.
+        Nothing here ever constrained it to actually be Twilio-hosted media.
+        The result: any code path that can get an inbound message processed
+        with a MediaUrl pointing somewhere other than Twilio's own API (a
+        misbehaving/compromised upstream, a second Twilio-compatible sender
+        if signature config is ever loosened, or simply as a
+        defense-in-depth question of "what does this function do if handed a
+        URL it shouldn't trust") causes the gateway to make an authenticated
+        outbound request -- with real Twilio account credentials attached --
+        to a host of that field's choosing. That is a live-credential
+        exfiltration primitive, and separately, since there was also no
+        IP/host safety check at all, a bare SSRF into loopback, RFC1918, or
+        the cloud metadata address.
+
+        Invariant broken: #3 ("Tool-produced or retrieved content never
+        acquires instruction authority"), generalised to the network layer --
+        the same class of bug already fixed in glc/routes/chat.py's
+        _resolve_image_urls (see glc/security/ssrf_guard.py), reused here.
+        This instance is worse than the chat.py one: there the attacker only
+        got the gateway to *fetch* a URL of their choosing; here they get the
+        gateway to fetch it *with live upstream provider credentials
+        attached*, which also brushes up against Invariant #1's spirit (an
+        adapter's provider credential must not be exposed to whatever content
+        that adapter is currently processing).
+
+        Fix: (1) reuse ssrf_guard.assert_safe_url() so the target can never
+        resolve to a loopback/private/link-local/metadata address, checked
+        fresh on every call (no caching, no TOCTOU across requests); (2) only
+        ever attach the Twilio Basic Auth credential when the URL's host is
+        actually a twilio.com media host -- real Twilio-hosted MMS media is
+        never served from anywhere else, so this is not a functional
+        regression, it just closes the credential-leak channel for every
+        other host.
+        """
+        from urllib.parse import urlparse
+
+        from glc.security.ssrf_guard import UnsafeURLError, assert_safe_url
+
+        host = (urlparse(url).hostname or "").lower()
+        if not (host == "api.twilio.com" or host.endswith(".twilio.com")):
+            raise ValueError(f"refusing to fetch MMS media from non-Twilio host: {host!r}")
+
+        try:
+            assert_safe_url(url)
+        except UnsafeURLError as e:
+            raise ValueError(f"refusing to fetch unsafe media url {url!r}: {e}") from e
+
         account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
         auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
             resp = await client.get(url, auth=(account_sid, auth_token))
             resp.raise_for_status()
             return resp.content

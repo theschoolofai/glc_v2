@@ -7,6 +7,10 @@ handling. HTTP is stubbed by monkeypatching httpx.AsyncClient.post.
 
 from __future__ import annotations
 
+import asyncio
+import http.server
+import threading
+
 import httpx
 import pytest
 
@@ -171,3 +175,109 @@ async def test_send_no_from_raises_in_live_mode():
     reply = ChannelReply(channel="twilio_sms", channel_user_id=OWNER_ID, text="x")
     with pytest.raises(RuntimeError):
         await adapter.send(reply)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Part 2 finding (new bug, not in Session 12 Section 6/7): _download_media()
+# used to fetch ANY url with no validation and attach this deployment's live
+# TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN as HTTP Basic Auth to whatever host
+# that url pointed at -- an SSRF plus a live-credential-exfiltration
+# primitive triggerable via an inbound message's MediaUrl0/1/... field. See
+# the docstring on Adapter._download_media in adapter.py for the full
+# writeup. These tests prove the fix: a non-Twilio host is rejected before
+# any network connection is attempted (so the credential is never sent),
+# using a real local HTTP server as the "attacker" to prove zero requests
+# reach it -- not just that an exception is raised.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class _CapturingHandler(http.server.BaseHTTPRequestHandler):
+    """Stands in for an attacker-controlled server. Records every request it
+    receives (path + Authorization header) so a test can assert none arrived."""
+
+    received: list[dict] = []
+
+    def do_GET(self):  # noqa: N802 - stdlib handler method name
+        _CapturingHandler.received.append(
+            {"path": self.path, "authorization": self.headers.get("Authorization")}
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.end_headers()
+        self.wfile.write(b"if you can read this, credentials leaked")
+
+    def log_message(self, format, *args):  # noqa: A002 - silence stderr spam
+        pass
+
+
+async def test_download_media_rejects_non_twilio_host_and_leaks_no_credential(monkeypatch):
+    """The core Part 2 regression test: a MediaUrl pointing anywhere other
+    than Twilio's own media API must be refused, and the attacker-controlled
+    host must receive zero connection attempts (i.e. the live Twilio
+    credentials are never placed on the wire toward it)."""
+    _CapturingHandler.received = []
+    server = http.server.HTTPServer(("127.0.0.1", 0), _CapturingHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACfaketestsidfaketestsidfaketest")
+        monkeypatch.setenv("TWILIO_AUTH_TOKEN", "faketesttoken-do-not-leak-me")
+        adapter = Adapter(config={"phone_number": BOT_PHONE})
+
+        with pytest.raises(ValueError, match="non-Twilio host"):
+            await adapter._download_media(f"http://127.0.0.1:{port}/steal-creds.jpg")
+
+        # Give any (incorrectly-sent) request a moment to land before we
+        # assert the negative -- avoids a flaky false-pass on a slow box.
+        await asyncio.sleep(0.05)
+        assert _CapturingHandler.received == [], (
+            "attacker-controlled host received a request -- credentials were exposed"
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+async def test_download_media_rejects_cloud_metadata_address():
+    """Classic SSRF target (AWS/GCP/Azure/Modal's own 169.254.169.254) must
+    be refused the same way -- it isn't a twilio.com host either."""
+    adapter = Adapter(config={"phone_number": BOT_PHONE})
+    with pytest.raises(ValueError, match="non-Twilio host"):
+        await adapter._download_media("http://169.254.169.254/latest/meta-data/")
+
+
+async def test_download_media_still_accepts_real_twilio_host(monkeypatch):
+    """Fix must not regress the legitimate path: an actual api.twilio.com
+    MediaUrl still reaches the safety checks and proceeds to the real fetch
+    (stubbed here so the test doesn't hit the network). DNS resolution
+    itself is exercised by ssrf_guard's own tests; here we only prove the
+    new Twilio-host allowlist doesn't block legitimate Twilio media URLs, so
+    the (deterministic, non-network) DNS lookup inside assert_safe_url is
+    stubbed rather than relied on."""
+    import glc.security.ssrf_guard as ssrf_guard
+
+    monkeypatch.setattr(ssrf_guard, "assert_safe_url", lambda url: None)
+
+    class _FakeMediaClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, auth=None):
+            assert url == "https://api.twilio.com/2010-04-01/Accounts/AC1/Media/ME1"
+            assert auth == ("ACfake", "tokfake")
+            return httpx.Response(200, content=b"\xff\xd8\xff jpeg bytes", request=httpx.Request("GET", url))
+
+    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACfake")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "tokfake")
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeMediaClient)
+
+    adapter = Adapter(config={"phone_number": BOT_PHONE})
+    data = await adapter._download_media("https://api.twilio.com/2010-04-01/Accounts/AC1/Media/ME1")
+    assert data == b"\xff\xd8\xff jpeg bytes"
