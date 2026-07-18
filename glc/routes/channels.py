@@ -41,7 +41,16 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
     elif token:
         presented = token
     expected = get_or_create_install_token()
-    if presented != expected:
+    # Finding (Part 1, Section 7 code leak): same class as control.py's
+    # _require_token fix — this compared the presented install token with
+    # plain `!=`, which short-circuits on the first differing byte (CWE-208)
+    # and lets a remote attacker recover the token one byte at a time via
+    # WebSocket connection-timing. Invariant #4 ("A credential issued for
+    # one tool, action, or request cannot be replayed or widened") — a
+    # timing-recoverable token is a token that can be silently widened to
+    # full adapter impersonation. Fixed with the same hmac.compare_digest
+    # constant-time comparison used everywhere else in the codebase.
+    if presented is None or not hmac.compare_digest(presented, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -125,7 +134,16 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
-    if mode == "subscribe" and hmac.compare_digest(token, expected):
+    # Finding (Part 1, Section 7 code leak): hmac.compare_digest("", "") is
+    # True, so an operator who forgot to set <NAME>_VERIFY_TOKEN made this
+    # endpoint accept ANY caller sending an empty hub.verify_token alongside
+    # hub.mode=subscribe — a fail-open default on a config-hygiene mistake.
+    # The blast radius was small (it only echoes back the caller's own
+    # challenge string) but "unset secret == open" is the wrong default for
+    # any auth check. Invariant #4 in spirit (a credential check must not be
+    # satisfiable by the absence of a credential). Fix: explicitly require a
+    # non-empty configured token before doing the comparison at all.
+    if mode == "subscribe" and expected and hmac.compare_digest(token, expected):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403)
 
