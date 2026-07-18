@@ -18,6 +18,7 @@ import hashlib
 import os
 from datetime import UTC, datetime
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -296,6 +297,14 @@ class Adapter(ChannelAdapter):
 
     async def _download_media(self, url: str) -> bytes:
         """Download Twilio-hosted MMS media using Basic Auth."""
+        # The credential we attach is the Twilio account auth token, which also
+        # signs webhooks — it must only ever be sent to Twilio. The media URL
+        # comes straight from the inbound webhook form, so refuse to send the
+        # credential anywhere that is not an https Twilio host.
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not (host == "twilio.com" or host.endswith(".twilio.com")):
+            raise ValueError(f"refusing to send Twilio credentials to non-Twilio media host: {host!r}")
         account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
         auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
         async with httpx.AsyncClient() as client:

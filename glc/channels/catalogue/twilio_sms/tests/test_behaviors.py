@@ -102,3 +102,17 @@ def test_inbound_form_tolerates_garbage_num_media():
     form = TwilioInboundForm.from_raw({"From": "+1", "NumMedia": "not-a-number"})
     assert form.NumMedia == 0
     assert form.media_items() == []
+
+
+async def test_download_media_refuses_non_twilio_host():
+    """The Twilio account auth token must never be sent to a caller-named,
+    non-Twilio media host (credential egress)."""
+    adapter = Adapter(config={})
+    for bad in (
+        "http://attacker.example/x",  # not https
+        "http://api.twilio.com/x",  # Twilio host but not https
+        "https://evil.com/x",  # wrong host
+        "https://api.twilio.com.evil.com/x",  # suffix trick
+    ):
+        with pytest.raises(ValueError):
+            await adapter._download_media(bad)
