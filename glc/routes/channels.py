@@ -28,6 +28,7 @@ from glc.config import get_or_create_install_token
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
+from glc.security.trust_level import classify as _classify_trust
 
 router = APIRouter()
 
@@ -65,6 +66,11 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # Re-derive trust level from the pairing database.  Never trust the
+            # adapter-supplied value: an adapter can fabricate "owner_paired" to
+            # bypass policy.  The gateway is the authoritative source of identity.
+            env = env.model_copy(update={"trust_level": _classify_trust(env.channel, env.channel_user_id)})
 
             ok, why = allowed(
                 env.channel,
@@ -144,6 +150,9 @@ async def channel_webhook(name: str, request: Request):
     msg = await adapter.on_message(raw)
     if msg is None:
         return {"status": "ok"}
+
+    # Re-derive trust level authoritatively, same as the WS path.
+    msg = msg.model_copy(update={"trust_level": _classify_trust(msg.channel, msg.channel_user_id)})
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()

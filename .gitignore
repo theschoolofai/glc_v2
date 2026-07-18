@@ -37,3 +37,6 @@ install_token
 
 # Logs
 *.log
+
+# Pytest temp dirs (--basetemp)
+tmp_pytest/
