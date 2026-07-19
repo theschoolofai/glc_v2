@@ -19,6 +19,16 @@ from glc.security.trust_level import classify
 
 from .schemas import TelegramUpdate
 
+# The 18 characters Telegram requires be backslash-escaped in a MarkdownV2
+# message body (https://core.telegram.org/bots/api#markdownv2-style).
+_MDV2_SPECIAL = set(r"_*[]()~`>#+-=|{}.!")
+
+
+def _escape_markdown_v2(text: str) -> str:
+    """Backslash-escape MarkdownV2 metacharacters so reply text is rendered
+    literally — never as links, formatting, or entities."""
+    return "".join("\\" + ch if ch in _MDV2_SPECIAL else ch for ch in text)
+
 
 class Adapter(ChannelAdapter):
     name = "telegram"
@@ -146,12 +156,17 @@ class Adapter(ChannelAdapter):
         )
 
     async def send(self, reply: ChannelReply) -> Any:
-        # Build sendMessage payload
+        # Build sendMessage payload. parse_mode is MarkdownV2, so the reply text
+        # MUST be escaped: it carries attacker-influenced content (the gateway
+        # echoes inbound text), and unescaped MarkdownV2 lets that content render
+        # masked phishing links [see me](https://evil), spoof formatting, or —
+        # for any benign text containing '.', '-', '(', etc. — trip Telegram's
+        # "can't parse entities" 400 so the reply is silently dropped.
         payload = {
             "chat_id": int(reply.channel_user_id)
             if reply.channel_user_id.isdigit()
             else reply.channel_user_id,
-            "text": reply.text or "",
+            "text": _escape_markdown_v2(reply.text or ""),
             "parse_mode": "MarkdownV2",
         }
 
