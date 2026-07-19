@@ -145,7 +145,10 @@ class Adapter(ChannelAdapter):
             raise RuntimeError("discord adapter: no transport configured (config['mock'|'client'])")
         # tts defaults to False and is omitted from the wire body — Discord
         # text-to-speech is opt-in per channel.
-        body = DiscordCreateMessage(content=reply.text or "")
+        # allowed_mentions is set explicitly (never rely on Discord's
+        # parse-everything default) so mention tokens carried in the reply text
+        # cannot fire @everyone/role/user pings with the bot's identity.
+        body = DiscordCreateMessage(content=reply.text or "", allowed_mentions={"parse": []})
         payload = body.model_dump(exclude={"tts"})
         return await api.send(payload)
 

@@ -15,6 +15,8 @@ Wire-format source:
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -55,5 +57,13 @@ class DiscordCreateMessage(BaseModel):
 
     content: str
     tts: bool = False
+    # allowed_mentions controls which mention tokens inside `content` actually
+    # notify. Discord's REST default (this field ABSENT) parses and fires EVERY
+    # mention it finds — @everyone/@here, role <@&id>, and user <@id> — so any
+    # reply text reflected from message input can mass-ping a server, notify
+    # arbitrary roles, or repeatedly ping a victim, all with the bot's identity
+    # and elevated mention permissions. Default to suppressing all pings; a
+    # caller may widen this deliberately (e.g. {"parse": ["users"]}).
+    allowed_mentions: dict[str, Any] = Field(default_factory=lambda: {"parse": []})
 
     model_config = ConfigDict(extra="forbid")
