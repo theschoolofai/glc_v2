@@ -228,9 +228,21 @@ def _est_tokens(messages, system_blocks, max_tokens):
         c = m.get("content", "")
         if isinstance(c, list):
             chars += len(P._extract_text_blocks(c))
-            chars += 1200 * sum(
-                1 for b in c if isinstance(b, dict) and b.get("type") in ("image_url", "image", "input_image")
-            )
+            for b in c:
+                if isinstance(b, dict) and b.get("type") in ("image_url", "image", "input_image"):
+                    # Count the image's real payload length (inline base64/data
+                    # URL, or URL string) instead of a flat 1200, so an oversized
+                    # image is subject to the SAME Router.pick max_ctx hard gate
+                    # as text. Flat 1200 scored any image at ~300 tokens, letting
+                    # a multi-MB inline image sail past every provider's max_ctx
+                    # and get forwarded upstream — bypassing invariant 8's
+                    # per-run context/cost limit that text obeys.
+                    iu = b.get("image_url")
+                    url = iu.get("url") if isinstance(iu, dict) else iu
+                    if not isinstance(url, str):
+                        data = b.get("data")
+                        url = data if isinstance(data, str) else ""
+                    chars += max(1200, len(url))
         else:
             chars += len(str(c))
     if isinstance(system_blocks, str):
