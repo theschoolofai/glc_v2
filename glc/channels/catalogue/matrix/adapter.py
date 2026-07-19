@@ -156,6 +156,17 @@ class Adapter(ChannelAdapter):
         if not mxc:
             return [], None
 
+        # The `url` field is fully sender-controlled. Only accept a real Matrix
+        # content URI (mxc://...). Without this check an untrusted sender can
+        # hand the runtime an arbitrary scheme — http://169.254.169.254/ (cloud
+        # metadata), http://127.0.0.1:8111/ (the gateway's own control plane),
+        # or file:///etc/passwd — as a "fetchable" Attachment.ref /
+        # voice_audio_ref, which is an SSRF / local-file-read primitive the
+        # moment the runtime's artifact resolver dereferences it. Drop the media
+        # (text still flows) rather than surface an attacker-chosen URL.
+        if not isinstance(mxc, str) or not mxc.startswith("mxc://"):
+            return [], None
+
         ref = mxc
         if mock is not None and hasattr(mock, "download_media"):
             # Resolve mxc:// → bytes and persist by reference. The agent
