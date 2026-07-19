@@ -29,6 +29,16 @@ from glc.security.trust_level import classify
 
 _MENTION_RE = re.compile(r"<at>[^<]*</at>\s*")
 
+# Markdown metacharacters to backslash-escape in outbound reply text. The
+# outbound Activity is sent with textFormat="markdown", so unescaped reply
+# content renders links/images/formatting — most dangerously the masked link
+# [safe text](https://evil) — with the bot's identity.
+_MD_SPECIAL = set(r"\`*_{}[]()#+-.!|>~")
+
+
+def _escape_markdown(text: str) -> str:
+    return "".join("\\" + ch if ch in _MD_SPECIAL else ch for ch in text)
+
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}  # app_id -> (token, expires_at)
 
 
@@ -170,7 +180,10 @@ class Adapter(ChannelAdapter):
 
         payload: dict[str, Any] = {
             "type": "message",
-            "text": reply.text or "",
+            # textFormat is markdown, so escape reply content (the gateway echoes
+            # inbound text) to stop masked phishing links and formatting spoofing
+            # rendering with the bot's identity.
+            "text": _escape_markdown(reply.text or ""),
             "textFormat": "markdown",
         }
         if reply.thread_id:
