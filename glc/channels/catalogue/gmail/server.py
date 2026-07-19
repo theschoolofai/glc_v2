@@ -216,7 +216,10 @@ def main():
 
     last_history_id = int(profile["historyId"])
     gmail_client = LiveGmailClient(service)
-    adapter = Adapter(config={"client": gmail_client})
+    # require_sender_auth=True: the live polling server MUST fail closed when
+    # a message arrives without a trusted Authentication-Results header. This
+    # is the production-mode flag for the SPF/DKIM/DMARC gate in on_message.
+    adapter = Adapter(config={"client": gmail_client, "require_sender_auth": True})
 
     processed_ids: set[str] = set()
 

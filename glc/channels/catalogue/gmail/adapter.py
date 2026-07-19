@@ -18,6 +18,7 @@ import base64
 import json
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from email import policy as email_policy
 from email.message import EmailMessage
@@ -154,6 +155,19 @@ class Adapter(ChannelAdapter):
         # senders are dropped at the adapter level to avoid flooding the agent.
         trust_level = self._resolve_trust_level(from_addr)
 
+        # SECURITY (invariant 2): the From: header alone is not proof of
+        # identity — an attacker can spoof any address. Before honoring an
+        # elevated trust from the pairing store, verify Gmail authenticated
+        # the sender (SPF/DKIM/DMARC in Authentication-Results). If sender
+        # authentication fails, downgrade to untrusted regardless of pairing.
+        if trust_level != "untrusted" and not self._verify_sender_authentication(email_msg):
+            logger.warning(
+                "Sender authentication failed for %s — downgrading trust from %s to untrusted",
+                from_addr,
+                trust_level,
+            )
+            trust_level = "untrusted"
+
         if self.config.get("is_public_channel") and not self._check_allowlist(from_addr, trust_level):
             return None  # type: ignore[return-value]
 
@@ -201,6 +215,16 @@ class Adapter(ChannelAdapter):
             from_addr = self._extract_email(from_addr_raw)
 
             trust_level = self._resolve_trust_level(from_addr)
+
+            # SECURITY (invariant 2): same authentication gate as on_message —
+            # downgrade to untrusted if SPF/DKIM/DMARC don't back the claimed From:.
+            if trust_level != "untrusted" and not self._verify_sender_authentication(email_msg):
+                logger.warning(
+                    "Sender authentication failed for %s — downgrading trust from %s to untrusted",
+                    from_addr,
+                    trust_level,
+                )
+                trust_level = "untrusted"
 
             if self.config.get("is_public_channel") and not self._check_allowlist(from_addr, trust_level):
                 continue
@@ -459,6 +483,87 @@ class Adapter(ChannelAdapter):
             'untrusted' for unknown senders
         """
         return classify("gmail", sender_email)
+
+    def _verify_sender_authentication(self, msg: Any) -> bool:
+        """Verify SPF, DKIM, and DMARC results from Gmail's headers.
+
+        The From: header is user-controlled — an attacker can set it to any
+        address. Gmail attaches an Authentication-Results header showing
+        whether the message was actually authenticated by the claimed sending
+        domain. We require ALL THREE (SPF, DKIM, DMARC) to pass before
+        honoring the claimed From: identity for trust classification.
+
+        Robustness (RFC 8601):
+        * ``authserv-id`` (the leading token of Authentication-Results) is
+          checked against the configured trusted authserv (default
+          ``mx.google.com``). A malicious sender can prepend their own
+          Authentication-Results header; Gmail prepends its own on receipt,
+          but we still verify we're reading Gmail's — not the attacker's —
+          verdict. Configure via ``config['trusted_authserv_ids']`` or
+          ``GMAIL_TRUSTED_AUTHSERV`` (comma-separated).
+        * Verdict matching uses a regex anchored at word boundaries
+          (``\\bspf=pass\\b``) so ``spf=passthrough`` or ``dkim=passwd`` do
+          not spuriously match.
+
+        Missing header:
+        * ``config['require_sender_auth']=True`` (production default) →
+          missing header FAILS verification (fail-closed).
+        * ``False`` (test default) → missing header is permissive so mocks
+          that don't inject the header still work. Do NOT set False in prod.
+
+        Returns True on pass; False on fail.
+        """
+        auth_results = msg.get_all("Authentication-Results") or []
+
+        if not auth_results:
+            # Header missing. Real Gmail ALWAYS adds it — absence means
+            # either a test mock, or a MITM stripped the header.
+            require_auth = self.config.get("require_sender_auth", False)
+            if require_auth:
+                logger.warning(
+                    "Authentication-Results header missing — treating as unverified"
+                )
+                return False
+            return True
+
+        # RFC 8601: each Authentication-Results value starts with the
+        # authserv-id, e.g. "mx.google.com; spf=pass ...". Trust only headers
+        # whose authserv-id is on our trusted list — refuses to read an
+        # attacker-prepended header whose authserv-id they control.
+        trusted = self.config.get("trusted_authserv_ids") or os.getenv(
+            "GMAIL_TRUSTED_AUTHSERV", "mx.google.com"
+        )
+        if isinstance(trusted, str):
+            trusted = [t.strip().lower() for t in trusted.split(",") if t.strip()]
+        else:
+            trusted = [str(t).strip().lower() for t in trusted]
+
+        matched_bodies: list[str] = []
+        for h in auth_results:
+            s = str(h).strip()
+            # authserv-id is the part before the first ';'; RFC 8601 allows
+            # optional whitespace and comments — for our purposes, splitting
+            # on the first ';' and lowercasing is sufficient.
+            head, sep, body = s.partition(";")
+            if not sep:
+                continue
+            authserv = head.strip().lower().split()[0] if head.strip() else ""
+            if authserv in trusted:
+                matched_bodies.append(body.lower())
+
+        if not matched_bodies:
+            logger.warning(
+                "no Authentication-Results header from a trusted authserv-id — treating as unverified"
+            )
+            return False
+
+        combined = " ".join(matched_bodies)
+        # Word-boundary regex prevents 'spf=passthrough' from matching 'spf=pass'.
+        spf_pass = bool(re.search(r"\bspf=pass\b", combined))
+        dkim_pass = bool(re.search(r"\bdkim=pass\b", combined))
+        dmarc_pass = bool(re.search(r"\bdmarc=pass\b", combined))
+
+        return spf_pass and dkim_pass and dmarc_pass
 
     def _check_allowlist(self, sender_email: str, trust_level: str) -> bool:
         """Check if a sender may be processed in a public channel.
