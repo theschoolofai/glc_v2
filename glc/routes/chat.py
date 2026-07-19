@@ -314,14 +314,24 @@ async def _resolve_image_urls(messages):
         new_blocks = []
         changed = False
         for b in content:
-            if isinstance(b, dict) and b.get("type") == "image_url":
-                iu = b.get("image_url")
-                url = iu.get("url") if isinstance(iu, dict) else iu
+            btype = b.get("type") if isinstance(b, dict) else None
+            if btype in ("image_url", "image", "input_image"):
+                if btype == "image_url":
+                    iu = b.get("image_url")
+                    url = iu.get("url") if isinstance(iu, dict) else iu
+                else:
+                    src = b.get("source") if isinstance(b.get("source"), dict) else {}
+                    if src.get("type") == "base64":
+                        new_blocks.append(b)
+                        continue
+                    url = b.get("url") or src.get("url")
                 if isinstance(url, str) and url.startswith(("http://", "https://")):
                     data_url = await _fetch_to_data_url(url)
                     new_blocks.append({"type": "image_url", "image_url": {"url": data_url}})
                     changed = True
                     continue
+                if isinstance(url, str) and not url.startswith("data:"):
+                    raise HTTPException(400, f"unsupported image url scheme: {url!r}")
             new_blocks.append(b)
         if changed:
             new_m = dict(m)
