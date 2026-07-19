@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from email import policy as email_policy
 from email.message import EmailMessage
 from email.parser import BytesParser
+from email.utils import parseaddr
 from typing import Any, Literal, Protocol
 
 from glc.channels.base import ChannelAdapter
@@ -411,10 +412,15 @@ class Adapter(ChannelAdapter):
         return "file"
 
     def _extract_email(self, addr: str) -> str:
-        """Extract bare email from 'Display Name <email@x.com>' format."""
-        if "<" in addr and ">" in addr:
-            return addr.split("<")[1].split(">")[0]
-        return addr.strip()
+        """Extract the authenticated addr-spec from a From header.
+
+        Uses RFC 5322 parsing, not a naive `<`/`>` split. The split returns the
+        text between the FIRST `<` and `>`, which includes the display-name — so
+        an attacker sending from their own DKIM-passing address with the owner's
+        address hidden in the display-name (`"<owner@x>" <attacker@evil>`) would
+        be resolved to `owner@x` and granted owner trust by classify(). parseaddr
+        returns the real mailbox (`attacker@evil`)."""
+        return parseaddr(addr or "")[1].strip()
 
     # ──────────────────────────────────────────────────────────────────
     # Person 8 (Shwetha): Reply formatter
