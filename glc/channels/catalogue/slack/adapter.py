@@ -23,6 +23,16 @@ from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.trust_level import classify
 
 
+def _slack_escape(text: str) -> str:
+    """Slack's documented escaping for text inserted into a message
+    (https://api.slack.com/reference/surfaces/formatting#escaping). Neutralises
+    every angle-bracket control sequence — broadcast mentions <!channel>/<!here>/
+    <!everyone>, user pings <@U…>, group pings <!subteam^S…>, channel links
+    <#C…> — so reply content cannot fire notifications with the bot's identity.
+    `&` must be escaped first to avoid double-encoding."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 class Adapter(ChannelAdapter):
     name = "slack"
 
@@ -106,7 +116,11 @@ class Adapter(ChannelAdapter):
 
         body: dict[str, Any] = {
             "channel": channel_id,
-            "text": reply.text,
+            # Escape angle-bracket control sequences: the gateway echoes inbound
+            # text into reply.text, and Slack always honours <!channel>/<!here>/
+            # <!everyone>/<@U…> in `text`, so unescaped content lets an attacker
+            # make the bot broadcast-ping the whole channel or ping arbitrary users.
+            "text": _slack_escape(reply.text or ""),
         }
 
         # Thread continuity: propagate thread_id back as thread_ts
