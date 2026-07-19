@@ -54,7 +54,6 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
-    owners = [p.channel_user_id for p in pairings.owners(channel=name)]
 
     try:
         while True:
@@ -65,6 +64,11 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             except Exception as e:
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
+
+            # Re-read the owner set on every message. Adapter connections are
+            # long-lived, so a set snapshotted at connect time would let a
+            # revoked owner keep passing the allowlist until they reconnect.
+            owners = [p.channel_user_id for p in pairings.owners(channel=name)]
 
             ok, why = allowed(
                 env.channel,
