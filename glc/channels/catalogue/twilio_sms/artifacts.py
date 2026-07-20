@@ -16,6 +16,7 @@ remove(ref) / cleanup_session(refs) explicitly once processing is done.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -28,6 +29,32 @@ DEFAULT_DIR = Path(os.path.expanduser("~/.glc/artifacts"))
 
 # Auto-expire artifacts older than this (seconds).
 MAX_AGE = 300  # 5 minutes
+
+
+def _url_secret() -> str:
+    """Server secret used to sign artifact-read URLs.
+
+    Prefers a dedicated secret; falls back to the Twilio auth token, which
+    a live deployment always has. Both are server-side only, so the derived
+    per-artifact token is unguessable to anyone who was not handed the URL.
+    """
+    return os.environ.get("GLC_ARTIFACT_URL_SECRET") or os.environ.get("TWILIO_AUTH_TOKEN") or ""
+
+
+def access_token(sha: str) -> str:
+    """Unguessable per-artifact read token = HMAC(server_secret, sha).
+
+    Included in the outbound MediaUrl handed to Twilio so Twilio (which does
+    not present our auth) can still fetch, while the artifact route rejects
+    unauthenticated/enumerating reads (finding #46)."""
+    return hmac.new(_url_secret().encode("utf-8"), sha.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+
+def verify_access_token(sha: str, token: str | None) -> bool:
+    """Constant-time check of an artifact-read token."""
+    if not token:
+        return False
+    return hmac.compare_digest(access_token(sha), token)
 
 
 def _resolve_dir() -> Path:
