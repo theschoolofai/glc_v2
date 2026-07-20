@@ -5,15 +5,22 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from glc.voice.tts import TTSError, synthesize
 
 router = APIRouter()
 
+# Session 12 Part 2 finding: unbounded `text` here could hang the
+# system_fallback provider's `say`/pyttsx3 subprocess indefinitely (no
+# `timeout=` on the subprocess call either — see system_fallback/
+# adapter.py). Invariant 8 (hard limits on time/cost). 5000 chars is
+# generous for a single spoken reply.
+MAX_SPEAK_TEXT_CHARS = 5000
+
 
 class SpeakRequest(BaseModel):
-    text: str
+    text: str = Field(max_length=MAX_SPEAK_TEXT_CHARS)
     voice_id: str | None = None
     agent: str | None = None
     prefer: Literal["default", "quality", "streaming", "realtime", "fallback"] = "default"

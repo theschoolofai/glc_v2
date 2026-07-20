@@ -12,9 +12,22 @@ from glc.voice.stt import STTError, transcribe
 
 router = APIRouter()
 
+# Session 12 Part 2 finding: this endpoint had no bound on audio size at
+# all, and the whisper_cpp subprocess it can dispatch to had no
+# `timeout=`. A caller sending several minutes of real audio (or many
+# concurrent large requests) could hang worker threads indefinitely —
+# `asyncio.to_thread` uses the shared default executor pool, so a
+# handful of long-running transcriptions stall unrelated requests
+# gateway-wide. Invariant 8 (hard limits on time/tokens/cost). 10MB
+# decoded is a generous cap for a single voice-command-style clip;
+# base64 inflates length by 4/3, so the encoded string is capped a bit
+# above that.
+MAX_AUDIO_BYTES = 10 * 1024 * 1024
+MAX_AUDIO_B64_CHARS = (MAX_AUDIO_BYTES * 4 // 3) + 1024
+
 
 class TranscribeRequest(BaseModel):
-    audio_b64: str
+    audio_b64: str = Field(max_length=MAX_AUDIO_B64_CHARS)
     mime: str = "audio/wav"
     agent: str | None = None
     prefer: Literal["default", "local", "streaming"] = "default"
@@ -34,6 +47,8 @@ async def transcribe_route(req: TranscribeRequest):
         audio = base64.b64decode(req.audio_b64)
     except Exception as e:
         raise HTTPException(400, f"audio_b64 is not valid base64: {e}") from e
+    if len(audio) > MAX_AUDIO_BYTES:
+        raise HTTPException(413, f"decoded audio is {len(audio)} bytes; capped at {MAX_AUDIO_BYTES}")
     try:
         r = await transcribe(audio, req.mime, prefer=req.prefer)
     except STTError as e:

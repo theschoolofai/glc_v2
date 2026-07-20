@@ -70,3 +70,14 @@ def test_transcribe_stub_returns_501(app_client):
     body = {"audio_b64": base64.b64encode(b"\x00").decode(), "mime": "audio/wav", "prefer": "default"}
     r = app_client.post("/v1/transcribe", json=body)
     assert r.status_code == 501
+
+
+def test_transcribe_rejects_oversized_audio(app_client):
+    """Session 12 Part 2 finding: this endpoint had no size cap at all,
+    letting a caller hang the shared thread-pool executor with a few
+    large/slow transcriptions (invariant 8)."""
+    from glc.routes.transcribe import MAX_AUDIO_BYTES
+
+    huge = base64.b64encode(b"\x00" * (MAX_AUDIO_BYTES + 1024)).decode()
+    r = app_client.post("/v1/transcribe", json={"audio_b64": huge, "mime": "audio/wav"})
+    assert r.status_code == 422

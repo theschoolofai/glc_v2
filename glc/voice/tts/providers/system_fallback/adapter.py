@@ -17,6 +17,11 @@ from pathlib import Path
 
 from glc.voice.tts.base import SynthesizeResult, TTSError, TTSProvider
 
+# Session 12 Part 2 finding: this subprocess had no timeout, so a very
+# long `text` (routes/speak.py now also caps text length, but this is
+# the layer that actually blocks) could hang indefinitely. Invariant 8.
+SAY_TIMEOUT_SECONDS = 30
+
 
 class Provider(TTSProvider):
     name = "system_fallback"
@@ -32,7 +37,10 @@ class Provider(TTSProvider):
         with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as f:
             out = Path(f.name)
         try:
-            subprocess.run(["say", "-o", str(out), text], check=True)
+            try:
+                subprocess.run(["say", "-o", str(out), text], check=True, timeout=SAY_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as e:
+                raise TTSError(f"say did not finish within {SAY_TIMEOUT_SECONDS}s") from e
             data = out.read_bytes()
         finally:
             out.unlink(missing_ok=True)
