@@ -1,26 +1,10 @@
 """Out-of-band control plane: /v1/control/kill, /v1/control/pair,
 /v1/control/pair/confirm, /v1/control/presence.
 
-Authorization model (hardened):
-
-* All control routes require the operator **CONTROL token** (constant-time
-  compare), NOT the installation token. The install token authenticates WS
-  adapter connections (role 3); separating the two means a role-3 adapter
-  that can read the install token can no longer reach /v1/control/*
-  (#37 F1 — Prerit-112).
-* The kill endpoint no longer trusts the peer IP. Behind Modal's ASGI
-  proxy every caller appears to originate from 127.0.0.1, so a loopback
-  gate is meaningless there (#72 — padmanabh275). Authorization rests on
-  the control token alone, regardless of apparent source IP.
-* State-changing control requests carry a single-use nonce
-  (X-Control-Nonce). A captured, otherwise-valid request cannot be
-  replayed (#37 F2 — Prerit-112).
-
-Out of scope for application code (deployment concern, noted only):
-leak1 (shared-process secrets) and full audit mount-isolation require
-per-component containers / Modal Secrets so that a compromised adapter
-process cannot read the operator control token off disk in the first
-place. That isolation must be enforced at the Modal layer, not here.
+All endpoints require the installation token (Authorization: Bearer ...).
+The kill endpoint is restricted to a *direct* loopback client; reverse
+proxies (Modal ASGI, nginx, etc.) make every peer look like 127.0.0.1, so
+forwarded-proxy signals fail closed unless GLC_KILL_ALLOW_REMOTE=1.
 """
 
 from __future__ import annotations
@@ -130,6 +114,26 @@ def _require_nonce(nonce: str | None) -> None:
         raise HTTPException(409, "control nonce already used (replay rejected)")
 
 
+def _is_direct_loopback(request: Request) -> bool:
+    """True only when the TCP peer is loopback *and* not a reverse proxy.
+
+    Behind Modal's ``@modal.asgi_app()`` (and most reverse proxies) the ASGI
+    ``request.client.host`` is ``127.0.0.1`` for every public request. Trusting
+    that alone would make the remote-kill gate a no-op. Treat proxy / Modal
+    signals as non-loopback so kill stays opt-in via ``GLC_KILL_ALLOW_REMOTE``.
+    """
+    if os.getenv("GLC_BEHIND_PROXY") == "1":
+        return False
+    # Modal sets MODAL_TASK_ID in container runtimes.
+    if os.getenv("MODAL_TASK_ID"):
+        return False
+    headers = request.headers
+    if headers.get("x-forwarded-for") or headers.get("x-forwarded-proto") or headers.get("forwarded"):
+        return False
+    client_host = request.client.host if request.client else ""
+    return client_host in ("127.0.0.1", "::1", "localhost")
+
+
 class PairRequest(BaseModel):
     channel: str
     channel_user_id: str
@@ -209,17 +213,16 @@ async def presence(request: Request, authorization: str | None = Header(default=
 
 
 @router.post("/v1/control/kill")
-async def kill(
-    request: Request,
-    authorization: str | None = Header(default=None),
-    x_control_nonce: str | None = Header(default=None),
-):
-    # Authorization is the control token ONLY. The peer IP is deliberately
-    # not consulted: behind Modal's ASGI proxy every caller looks like
-    # loopback, so a 127.0.0.1 gate is trivially bypassed (#72).
-    _require_control_token(authorization)
-    _require_nonce(x_control_nonce)
-
+async def kill(request: Request, authorization: str | None = Header(default=None)):
+    _require_token(authorization)
+    client_host = request.client.host if request.client else "unknown"
+    if os.getenv("GLC_KILL_ALLOW_REMOTE") != "1" and not _is_direct_loopback(request):
+        raise HTTPException(
+            403,
+            f"kill is restricted to direct loopback (got peer={client_host!r}; "
+            "proxied/Modal peers are not treated as loopback). "
+            "Set GLC_KILL_ALLOW_REMOTE=1 to override (not recommended).",
+        )
     # Send SIGTERM to ourselves shortly after returning so the client gets a 200.
     import asyncio
 

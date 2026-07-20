@@ -69,7 +69,8 @@ image = (
         "cd /app && uv export --frozen --no-dev --no-emit-project -o /app/requirements.lock.txt",
         "uv pip install --system -r /app/requirements.lock.txt",
     )
-    .env({"GLC_CONFIG_DIR": "/data/glc", "PYTHONPATH": "/app"})
+    .env({"GLC_CONFIG_DIR": "/data/glc", "GLC_BEHIND_PROXY": "1"})
+    .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
 )
 
 # Persistent Volume for audit db, pairing db, install/control tokens.
