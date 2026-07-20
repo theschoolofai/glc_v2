@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
@@ -42,6 +43,8 @@ from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
 from glc.security.trust_level import derive_trust_level
+
+_LOG = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -288,7 +291,23 @@ async def channel_webhook(name: str, request: Request):
         "raw_body": await _read_body_capped(request, MAX_WEBHOOK_BODY_BYTES),
         "headers": dict(request.headers),
     }
-    msg = await adapter.on_message(raw)
+    # This route is unauthenticated by design — each adapter is responsible
+    # for verifying its own request (signature, token, etc.) inside
+    # on_message(). Not every adapter's parser is written to tolerate
+    # arbitrary/malformed input from an anonymous caller though (some raise
+    # on a payload shape they don't recognise, e.g. a schema-validation
+    # error or a missing-key lookup), and an uncaught exception here would
+    # turn any anonymous POST into an unauthenticated 500 for that channel.
+    # Fail closed instead: treat a parse failure as a rejected message, the
+    # same outcome as an adapter that verified the request and returned
+    # None.
+    try:
+        msg = await adapter.on_message(raw)
+    except Exception:
+        _LOG.warning(
+            "channel webhook: %s adapter.on_message() raised on malformed input", name, exc_info=True
+        )
+        return JSONResponse(status_code=400, content={"error": "malformed payload"})
     if msg is None:
         return {"status": "ok"}
 
