@@ -40,7 +40,7 @@ class ChannelMessage(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    def with_server_trust(self, trust_level: TrustLevel) -> "ChannelMessage":
+    def with_server_trust(self, trust_level: TrustLevel) -> ChannelMessage:
         """Return a copy with `trust_level` overwritten by a server-derived
         value. The wire-supplied trust_level is never authoritative (findings
         #10 / #48 / #77A): a client could otherwise self-declare

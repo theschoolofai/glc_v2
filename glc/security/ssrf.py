@@ -64,7 +64,7 @@ def _resolve_ips(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addres
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as e:
-        raise HTTPException(400, f"cannot resolve host {host!r}: {e}")
+        raise HTTPException(400, f"cannot resolve host {host!r}: {e}") from e
     for info in infos:
         sockaddr = info[4]
         raw = sockaddr[0]
@@ -73,7 +73,7 @@ def _resolve_ips(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addres
         except ValueError:
             continue
     if not ips:
-        raise HTTPException(400, f"cannot resolve host {host!r}")
+        raise HTTPException(400, f"cannot resolve host {host!r}") from None
     return ips
 
 
@@ -84,16 +84,16 @@ def assert_safe_url(url: str) -> str:
     routable public address. Returns the url on success.
     """
     if not isinstance(url, str):
-        raise HTTPException(400, "url must be a string")
+        raise HTTPException(400, "url must be a string") from None
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise HTTPException(400, f"unsupported url scheme {parsed.scheme!r}; only http/https allowed")
+        raise HTTPException(400, f"unsupported url scheme {parsed.scheme!r}; only http/https allowed") from None
     host = parsed.hostname
     if not host:
-        raise HTTPException(400, "url has no host")
+        raise HTTPException(400, "url has no host") from None
     for ip in _resolve_ips(host):
         if _ip_is_forbidden(ip):
-            raise HTTPException(400, "url resolves to a disallowed (private/loopback/reserved) address")
+            raise HTTPException(400, "url resolves to a disallowed (private/loopback/reserved) address") from None
     return url
 
 
@@ -116,7 +116,7 @@ async def fetch_bytes(url: str) -> tuple[bytes, str]:
             try:
                 r = await client.get(current)
             except httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch url: {e}")
+                raise HTTPException(400, f"failed to fetch url: {e}") from e
             if r.is_redirect:
                 location = r.headers.get("location")
                 if not location:
@@ -128,13 +128,13 @@ async def fetch_bytes(url: str) -> tuple[bytes, str]:
             try:
                 r.raise_for_status()
             except httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch url: {e}")
+                raise HTTPException(400, f"failed to fetch url: {e}") from e
             content = r.content
             if len(content) > MAX_IMAGE_BYTES:
                 raise HTTPException(400, "fetched resource exceeds size cap")
             ctype = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
             return content, ctype
-    raise HTTPException(400, "too many redirects")
+    raise HTTPException(400, "too many redirects") from None
 
 
 async def fetch_to_data_url(url: str) -> str:
