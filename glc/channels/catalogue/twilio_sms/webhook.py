@@ -148,9 +148,17 @@ def build_app(
     if serve_artifacts:
 
         @app.get("/artifacts/{sha}")
-        async def get_artifact(sha: str) -> Response:
-            # Twilio fetches outbound MMS MediaUrls from here. The store's
-            # _validate_ref guards the sha against path traversal.
+        async def get_artifact(sha: str, request: Request) -> Response:
+            # These artifacts are private inbound/outbound media. Serving them
+            # to any anonymous GET leaks private media and lets an attacker
+            # enumerate the store (finding #46). Require an unguessable,
+            # server-signed per-artifact token (HMAC(secret, sha)) supplied as
+            # `?token=` — the same token embedded in the outbound MediaUrl so
+            # Twilio (which does not present our auth) can still fetch.
+            token = request.query_params.get("token") or request.headers.get("X-Artifact-Token")
+            if not artifacts.verify_access_token(sha, token):
+                return Response(status_code=403, content="forbidden")
+            # The store's _validate_ref guards the sha against path traversal.
             data = artifacts.get_bytes(f"art:{sha}")
             if data is None:
                 return Response(status_code=404, content="not found")

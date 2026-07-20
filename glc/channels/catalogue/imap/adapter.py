@@ -34,7 +34,11 @@ Outbound pipeline  send(reply) → dict
 
 from __future__ import annotations
 
+import email as _emaillib
+import email.policy as _email_policy
+import email.utils as _email_utils
 import hashlib
+import re as _re
 import smtplib
 import uuid
 from datetime import datetime
@@ -50,6 +54,87 @@ from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
 from glc.security.trust_level import classify
 
 _BOT_FROM = "bot@example.com"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Sender verification (finding #8)
+#
+# The RFC 5322 `From` header is unauthenticated — anyone can send an
+# email claiming `From: owner@example.com`. Classifying trust straight
+# off `From` lets a role-1 outsider send one spoofed email and be
+# promoted to owner_paired. Trust must instead come from a sender the
+# receiving MTA actually *authenticated*: a DMARC pass (or an aligned
+# SPF+DKIM pass) recorded in an `Authentication-Results` header. Absent
+# that proof we fail closed to untrusted.
+# ──────────────────────────────────────────────────────────────────
+
+
+def _addr_domain(addr: str) -> str:
+    """Domain of the bare RFC 5322 address (display-name proof parsing)."""
+    _name, email_addr = _email_utils.parseaddr(addr or "")
+    return email_addr.rpartition("@")[2].strip().lower().rstrip(".")
+
+
+def _aligned(auth_domain: str, from_domain: str) -> bool:
+    """DMARC-style relaxed alignment: equal or one is a subdomain of the other."""
+    a = (auth_domain or "").strip().lower().rstrip(".")
+    f = (from_domain or "").strip().lower().rstrip(".")
+    if not a or not f:
+        return False
+    return a == f or a.endswith("." + f) or f.endswith("." + a)
+
+
+def _ar_authserv_id(ar_value: str) -> str:
+    """The authserv-id token that opens an Authentication-Results value."""
+    head = ar_value.split(";", 1)[0].strip()
+    return head.split()[0].lower() if head else ""
+
+
+def _ar_proves_domain(ar_value: str, from_domain: str) -> bool:
+    """True iff this Authentication-Results value authenticates *from_domain*.
+
+    Accepts a DMARC pass (which by definition requires From alignment), or
+    an aligned SPF pass AND aligned DKIM pass. A DKIM/SPF pass for the
+    attacker's *own* domain does not count — it must align with the From
+    domain — so a DKIM-passing stranger spoofing the owner stays untrusted.
+    """
+    dmarc = _re.search(r"\bdmarc\s*=\s*(\w+)", ar_value, _re.I)
+    if dmarc and dmarc.group(1).lower() == "pass":
+        hf = _re.search(r"header\.from\s*=\s*([^\s;]+)", ar_value, _re.I)
+        if hf is None or _aligned(hf.group(1), from_domain):
+            return True
+    spf = _re.search(r"\bspf\s*=\s*(\w+)", ar_value, _re.I)
+    dkim = _re.search(r"\bdkim\s*=\s*(\w+)", ar_value, _re.I)
+    if spf and spf.group(1).lower() == "pass" and dkim and dkim.group(1).lower() == "pass":
+        dkd = _re.search(r"header\.d\s*=\s*([^\s;]+)", ar_value, _re.I)
+        spfd = _re.search(r"smtp\.mailfrom\s*=\s*([^\s;]+)", ar_value, _re.I)
+        dk_ok = dkd is not None and _aligned(dkd.group(1), from_domain)
+        spf_ok = spfd is not None and _aligned(spfd.group(1).rpartition("@")[2], from_domain)
+        if dk_ok and spf_ok:
+            return True
+    return False
+
+
+def _verified_sender(msg: Any, from_addr: str, *, trusted_authserv_ids: Any = None) -> str | None:
+    """Return the bare From address only when the receiving MTA authenticated
+    the From domain; otherwise None (→ classify as untrusted).
+
+    ``trusted_authserv_ids`` (optional): when set, only Authentication-Results
+    stamped by one of these authserv-ids are trusted, which defeats
+    attacker-injected AR headers. When unset, all AR headers are considered
+    (the deployment MTA is responsible for stripping foreign AR headers).
+    """
+    from_domain = _addr_domain(from_addr)
+    if not from_domain:
+        return None
+    trusted = {t.lower() for t in trusted_authserv_ids} if trusted_authserv_ids else None
+    for ar_value in msg.get_all("Authentication-Results") or []:
+        if trusted is not None and _ar_authserv_id(ar_value) not in trusted:
+            continue
+        if _ar_proves_domain(ar_value, from_domain):
+            _name, bare = _email_utils.parseaddr(from_addr or "")
+            return bare or None
+    return None
 
 # Map MIME main-type to Attachment.kind
 _KIND_MAP: dict[str, Literal["image", "audio", "video", "file", "location"]] = {
@@ -178,8 +263,18 @@ class Adapter(ChannelAdapter):
             if parsed.references:
                 self._references_cache[parsed.message_id] = parsed.references
 
-        # 3. Trust classification using the bare sender address
-        trust_level = classify(self.name, parsed.sender)
+        # 3. Trust classification — ONLY from a sender the receiving MTA
+        #    verified. The raw `From` header is unauthenticated, so we never
+        #    derive trust from it directly (finding #8). Re-parse the message
+        #    to read the MTA-stamped Authentication-Results; fail closed to
+        #    untrusted when no passing, aligned result is present.
+        msg_obj = _emaillib.message_from_bytes(raw_bytes, policy=_email_policy.default)
+        verified = _verified_sender(
+            msg_obj,
+            parsed.sender,
+            trusted_authserv_ids=self.config.get("trusted_authserv_ids"),
+        )
+        trust_level = classify(self.name, verified) if verified is not None else "untrusted"
 
         # 4. Public-channel gate: silently drop untrusted senders
         if self.is_public_channel and trust_level == "untrusted":

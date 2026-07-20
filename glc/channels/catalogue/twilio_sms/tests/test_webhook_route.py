@@ -105,16 +105,33 @@ def test_artifact_route_serves_stored_bytes():
     client, _ = _client_and_seen()
     ref = artifacts.put(b"\xff\xd8\xff jpeg", content_type="image/jpeg")
     sha = ref.removeprefix("art:")
+    token = artifacts.access_token(sha)
 
-    resp = client.get(f"/artifacts/{sha}")
+    resp = client.get(f"/artifacts/{sha}?token={token}")
 
     assert resp.status_code == 200
     assert resp.content == b"\xff\xd8\xff jpeg"
     assert resp.headers["content-type"].startswith("image/jpeg")
 
 
+def test_artifact_route_requires_token():
+    """Unauthenticated reads are rejected (#46): no anonymous access to
+    private media, and no enumeration oracle."""
+    client, _ = _client_and_seen()
+    ref = artifacts.put(b"\xff\xd8\xff jpeg", content_type="image/jpeg")
+    sha = ref.removeprefix("art:")
+
+    assert client.get(f"/artifacts/{sha}").status_code == 403  # missing token
+    assert client.get(f"/artifacts/{sha}?token=wrong").status_code == 403  # forged token
+    # A wrong token is refused even though the artifact really exists — the
+    # 403 is identical whether or not the sha is stored, so it is no oracle.
+
+
 def test_artifact_route_404_for_unknown_or_bad_sha():
     client, _ = _client_and_seen()
-    assert client.get("/artifacts/deadbeefdeadbeef").status_code == 404
+    # With a valid token, an unknown/bad sha is a genuine 404 (not a leak).
+    unknown = "deadbeefdeadbeef"
+    assert client.get(f"/artifacts/{unknown}?token={artifacts.access_token(unknown)}").status_code == 404
     # Traversal / non-hex shas resolve to None via the store's _validate_ref.
-    assert client.get("/artifacts/notavalidsha").status_code == 404
+    bad = "notavalidsha"
+    assert client.get(f"/artifacts/{bad}?token={artifacts.access_token(bad)}").status_code == 404
