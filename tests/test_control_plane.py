@@ -104,10 +104,10 @@ def test_pair_bad_trust_level_400(app_client, control_token):
 # --------------------------------------------------------------------------
 # #72 — kill authorization no longer trusts the peer IP
 # --------------------------------------------------------------------------
-def test_kill_rejects_non_loopback_caller_without_token(app_client):
+def test_kill_rejects_non_loopback_caller_without_token(raw_client):
     """A caller that is not loopback and has no control token is rejected —
     but crucially the rejection is about the *token*, not the IP."""
-    r = app_client.post("/v1/control/kill")
+    r = raw_client.post("/v1/control/kill")
     assert r.status_code == 401
 
 

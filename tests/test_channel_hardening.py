@@ -46,9 +46,9 @@ def _write_channels_yaml(body: str) -> None:
 # --------------------------------------------------------------------------
 # #76 channel-bind
 # --------------------------------------------------------------------------
-def test_channel_mismatch_closes_and_audits(app_client, install_token):
+def test_channel_mismatch_closes_and_audits(raw_client, install_token):
     with pytest.raises(WebSocketDisconnect):
-        with app_client.websocket_connect(f"/v1/channels/whatsapp?token={install_token}") as ws:
+        with raw_client.websocket_connect(f"/v1/channels/whatsapp?token={install_token}") as ws:
             ws.send_json(_env("discord"))  # declared channel != route name
             ws.receive_json()  # server closes instead of replying
     rows = audit_query(limit=50)
@@ -109,7 +109,7 @@ def test_per_user_cap_still_enforced_alongside_channel_ceiling():
 # --------------------------------------------------------------------------
 # #47 mention gate ignores spoofed caller metadata
 # --------------------------------------------------------------------------
-def test_spoofed_mention_metadata_ignored(app_client, install_token):
+def test_spoofed_mention_metadata_ignored(raw_client, install_token):
     _write_channels_yaml(
         "channels:\n"
         "  townsquare:\n"
@@ -119,7 +119,7 @@ def test_spoofed_mention_metadata_ignored(app_client, install_token):
         "    allowed_senders: ['42']\n"
         "    mention_tokens: ['@bot']\n"
     )
-    with app_client.websocket_connect(f"/v1/channels/townsquare?token={install_token}") as ws:
+    with raw_client.websocket_connect(f"/v1/channels/townsquare?token={install_token}") as ws:
         # No mention token in the text, but caller LIES in metadata.
         ws.send_json(_env("townsquare", text="hello all", was_mentioned=True, is_public_channel=False))
         dropped = ws.receive_json()
@@ -153,10 +153,10 @@ def test_normal_webhook_body_not_rejected_for_size(app_client):
 # --------------------------------------------------------------------------
 # #90 owner revocation mid-connection (TOCTOU)
 # --------------------------------------------------------------------------
-def test_revoked_owner_blocked_mid_connection(app_client, install_token):
+def test_revoked_owner_blocked_mid_connection(raw_client, install_token):
     store = get_pairing_store()
     store.force_pair_owner("whatsapp", "42", user_handle="owner")
-    with app_client.websocket_connect(f"/v1/channels/whatsapp?token={install_token}") as ws:
+    with raw_client.websocket_connect(f"/v1/channels/whatsapp?token={install_token}") as ws:
         ws.send_json(_env("whatsapp"))
         first = ws.receive_json()
         assert first.get("text", "").startswith("[glc echo]")  # owner allowed
@@ -171,9 +171,9 @@ def test_revoked_owner_blocked_mid_connection(app_client, install_token):
 # --------------------------------------------------------------------------
 # #10/#48/#77A trust re-derivation
 # --------------------------------------------------------------------------
-def test_wire_trust_level_is_rederived_not_trusted(app_client, install_token):
+def test_wire_trust_level_is_rederived_not_trusted(raw_client, install_token):
     # Unpaired sender self-declares owner_paired on an owner-only channel.
-    with app_client.websocket_connect(f"/v1/channels/whatsapp?token={install_token}") as ws:
+    with raw_client.websocket_connect(f"/v1/channels/whatsapp?token={install_token}") as ws:
         ws.send_json(_env("whatsapp", user_id="99", trust="owner_paired"))
         resp = ws.receive_json()
         assert "error" in resp and "dropped" in resp["error"]  # not treated as owner
