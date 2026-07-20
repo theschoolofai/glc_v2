@@ -4,6 +4,18 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Session 12 Part 2 finding: `max_tokens` used to be an unbounded plain
+# `int`. `routes/chat.py`'s `_est_tokens()` folds it directly into the
+# estimate `Router.pick()` (glc/routing.py) checks against each
+# provider's `max_ctx`/TPM/RPD *before* dispatch — the one hard limit
+# the router exists to enforce. A negative value drives that estimate
+# negative, sailing past every pre-check for a prompt the provider will
+# reject or choke on; a huge positive value forwards unclamped into the
+# outbound `max_tokens`/`maxOutputTokens` param, requesting unbounded
+# paid-provider output. Bounding it here closes both, invariant 8 (hard
+# limits on tokens/cost).
+MAX_TOKENS_CEILING = 32768
+
 
 class ToolDef(BaseModel):
     """Canonical tool definition. Schema is JSON-Schema (typically from Pydantic)."""
@@ -46,7 +58,7 @@ class ChatRequest(BaseModel):
     system: str | list[CacheableSystemBlock] | None = None
     provider: str | None = None
     model: str | None = None
-    max_tokens: int = 2048
+    max_tokens: int = Field(default=2048, ge=1, le=MAX_TOKENS_CEILING)
     temperature: float = 0.7
     stream: bool = False
 
@@ -150,7 +162,7 @@ class VisionRequest(BaseModel):
     schema_name: str = "out"
     model: str | None = None
     provider: str | None = None
-    max_tokens: int = 1024
+    max_tokens: int = Field(default=1024, ge=1, le=MAX_TOKENS_CEILING)
     temperature: float = 0.0
     agent: str | None = None
     session: str | None = None
