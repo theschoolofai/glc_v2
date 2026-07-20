@@ -21,8 +21,13 @@ queue_adaptive_card_message(card)      → Activity with attachments[]
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
+
+import jwt
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 OWNER_AAD_ID = "29:42"  # `29:` is the Teams user-id prefix.
 STRANGER_AAD_ID = "29:999"
@@ -32,6 +37,21 @@ STRANGER_ID = STRANGER_AAD_ID
 SERVICE_URL = "https://smba.trafficmanager.net/amer/"
 TENANT_ID = "tenant-aaa"
 CONVERSATION_ID = "a:conv-1"
+
+# A test-only RSA keypair standing in for Microsoft's Bot Framework JWKS
+# signing key, so `on_message`'s JWT verification (glc/channels/catalogue
+# /teams/auth.py) is exercised for real in these tests — the same way
+# whatsapp's tests compute a real HMAC against a test secret instead of
+# skipping verification. Never used for anything but this test module.
+TEST_APP_ID = "test-teams-app-id"
+_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+TEST_PUBLIC_KEY = _PRIVATE_KEY.public_key()
+
+
+def _sign_test_jwt(*, app_id: str = TEST_APP_ID, issuer: str = "https://api.botframework.com") -> str:
+    now = int(time.time())
+    claims = {"aud": app_id, "iss": issuer, "iat": now, "exp": now + 300}
+    return jwt.encode(claims, _PRIVATE_KEY, algorithm="RS256")
 
 
 def _activity(
@@ -111,6 +131,24 @@ class TeamsMock:
         )
         self.inbound_events.append(ev)
         return ev
+
+    def to_wire(
+        self,
+        activity: dict[str, Any],
+        *,
+        valid_token: bool = True,
+        app_id: str = TEST_APP_ID,
+    ) -> dict[str, Any]:
+        """Wrap a bare Activity dict into the transport shape `on_message`
+        actually receives: `{"raw_body": bytes, "headers": {...}}`, with
+        a real (or deliberately invalid) Bot Framework-style JWT in the
+        Authorization header — mirrors how a real receiver would call
+        the adapter after reading the HTTP request."""
+        token = _sign_test_jwt(app_id=app_id) if valid_token else "not-a-valid-jwt"
+        return {
+            "raw_body": json.dumps(activity).encode(),
+            "headers": {"authorization": f"Bearer {token}"},
+        }
 
     async def send(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.rate_limited:

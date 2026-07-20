@@ -14,6 +14,7 @@ Key wire-format facts from the Bot Framework docs:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -21,6 +22,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from glc.channels.base import ChannelAdapter
+from glc.channels.catalogue.teams.auth import TeamsAuthError, verify_bot_framework_jwt
 from glc.channels.catalogue.teams.schemas import ADAPTIVE_CARD_CONTENT_TYPE
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.allowlists import allowed
@@ -103,6 +105,37 @@ class Adapter(ChannelAdapter):
         # Disconnect signal: log and return None so the gateway can reconnect.
         if mock is not None and mock.pop_disconnect():
             return None
+
+        # Bot Framework authenticates every inbound request with a
+        # `Authorization: Bearer <JWT>` header signed by Microsoft — the
+        # *only* authentication it provides, equivalent to Twilio's
+        # X-Twilio-Signature or Meta's X-Hub-Signature-256. Without this
+        # check, `activity["from"]["id"]` below is a completely
+        # unauthenticated, caller-supplied value, and anyone who reaches
+        # this adapter can claim to be the owner. `raw` is the transport
+        # envelope `{"raw_body": bytes, "headers": {...}}`, matching the
+        # convention `whatsapp`/`twilio_sms` already use.
+        if not isinstance(raw, dict):
+            return None
+        raw_body = raw.get("raw_body")
+        headers = {str(k).lower(): str(v) for k, v in (raw.get("headers") or {}).items()}
+        if not isinstance(raw_body, bytes):
+            return None
+
+        try:
+            verify_bot_framework_jwt(
+                headers.get("authorization"),
+                app_id=os.environ.get("TEAMS_APP_ID", ""),
+                public_key=self.config.get("bot_framework_public_key"),
+            )
+        except TeamsAuthError:
+            return None
+
+        try:
+            activity = json.loads(raw_body)
+        except json.JSONDecodeError:
+            return None
+        raw = activity
 
         # Only process message activities; ignore typing, conversationUpdate, etc.
         if raw.get("type") != "message":
