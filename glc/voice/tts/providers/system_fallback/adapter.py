@@ -9,6 +9,7 @@ one through this provider.
 from __future__ import annotations
 
 import base64
+import os
 import platform
 import shutil
 import subprocess
@@ -16,6 +17,10 @@ import tempfile
 from pathlib import Path
 
 from glc.voice.tts.base import SynthesizeResult, TTSError, TTSProvider
+
+# Keep the platform subprocess bounded even when `say` or an audio driver
+# stalls. This is configurable for slower machines without allowing infinity.
+SAY_TIMEOUT_SECONDS = float(os.getenv("GLC_SAY_TIMEOUT_SECONDS", "30"))
 
 
 class Provider(TTSProvider):
@@ -42,7 +47,14 @@ class Provider(TTSProvider):
             tf.write(text)
             text_in = Path(tf.name)
         try:
-            subprocess.run(["say", "-o", str(out), "-f", str(text_in)], check=True)
+            try:
+                subprocess.run(
+                    ["say", "-o", str(out), "-f", str(text_in)],
+                    check=True,
+                    timeout=SAY_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise TTSError(f"say did not finish within {SAY_TIMEOUT_SECONDS:g}s") from exc
             data = out.read_bytes()
         finally:
             out.unlink(missing_ok=True)
