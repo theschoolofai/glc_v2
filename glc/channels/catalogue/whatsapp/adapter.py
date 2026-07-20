@@ -299,6 +299,8 @@ class Adapter(ChannelAdapter):
             else:
                 return None
         else:
+            # Unsigned Meta ``entry`` / Twilio form dicts must not be trusted —
+            # only the verified raw_body + signature path is accepted.
             return None
 
         if parsed is None:

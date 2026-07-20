@@ -145,3 +145,31 @@ async def test_channel_specific_behaviour_signature_verification(mock, pair_owne
     out = await adapter.on_message({"raw_body": raw, "headers": headers})
     assert isinstance(out, ChannelMessage)
     assert out.text == "valid probe"
+
+
+@pytest.mark.asyncio
+async def test_unsigned_meta_entry_dict_is_rejected(mock, pair_owner):
+    """Bare Meta ``entry`` payloads (no raw_body / HMAC) must not grant owner_paired.
+
+    Before the fix, ``on_message`` accepted unsigned ``entry`` dicts and
+    classified a spoofed owner WaId as owner_paired.
+    """
+    adapter = Adapter(config={"mock": mock})
+    unsigned = mock.queue_unsigned_meta_dict("spoofed as owner")
+    assert "entry" in unsigned and "raw_body" not in unsigned
+    out = await adapter.on_message(unsigned)
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_unsigned_twilio_form_dict_is_rejected(mock, pair_owner):
+    adapter = Adapter(config={"mock": mock})
+    unsigned = {
+        "From": f"whatsapp:+{OWNER_ID}",
+        "WaId": OWNER_ID,
+        "Body": "spoofed twilio",
+        "MessageSid": "SM123",
+        "AccountSid": "AC123",
+    }
+    out = await adapter.on_message(unsigned)
+    assert out is None
