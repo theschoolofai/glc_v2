@@ -29,13 +29,24 @@ class Provider(TTSProvider):
 
     @staticmethod
     def _macos_say(text: str) -> SynthesizeResult:
+        # #87: NEVER pass user text as a positional argv to `say`. A value
+        # like "-f/etc/passwd" would be parsed as the `-f <file>` flag and
+        # `say` would speak (and thus expose, as audio) arbitrary local files.
+        # Instead write the text to a temp file and feed it with `-f`, so the
+        # user input is always data read from a file we control, never argv.
         with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as f:
             out = Path(f.name)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", encoding="utf-8", delete=False
+        ) as tf:
+            tf.write(text)
+            text_in = Path(tf.name)
         try:
-            subprocess.run(["say", "-o", str(out), text], check=True)
+            subprocess.run(["say", "-o", str(out), "-f", str(text_in)], check=True)
             data = out.read_bytes()
         finally:
             out.unlink(missing_ok=True)
+            text_in.unlink(missing_ok=True)
         return SynthesizeResult(
             audio_b64=base64.b64encode(data).decode("ascii"),
             mime="audio/aiff",
