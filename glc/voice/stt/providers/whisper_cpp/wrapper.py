@@ -31,6 +31,10 @@ WHISPER_THREADS = int(os.getenv("GLC_WHISPER_THREADS", str(_DEFAULT_THREADS)))
 # Beam size: 1=greedy (fastest), 5=default accuracy. 2 halves decoding cost
 # with negligible accuracy loss on typical speech.
 WHISPER_BEAM_SIZE = int(os.getenv("GLC_WHISPER_BEAM_SIZE", "2"))
+# A native process must never hold an executor worker forever. Operators can
+# raise this for unusually slow hardware, while every invocation remains
+# bounded by default.
+WHISPER_TIMEOUT_SECONDS = float(os.getenv("GLC_WHISPER_TIMEOUT_SECONDS", "120"))
 
 
 def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str, str, int]:
@@ -69,12 +73,20 @@ def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str
         if use_vad:
             cmd.extend(["-nth", str(VAD_THRESHOLD)])
 
-        out = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        try:
+            out = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=WHISPER_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # whisper-cli may create its output file before it stalls.
+            audio_path.with_suffix(audio_path.suffix + ".json").unlink(missing_ok=True)
+            raise RuntimeError(
+                f"whisper-cli did not finish within {WHISPER_TIMEOUT_SECONDS:g}s"
+            ) from exc
     finally:
         audio_path.unlink(missing_ok=True)
     json_path = audio_path.with_suffix(audio_path.suffix + ".json")
