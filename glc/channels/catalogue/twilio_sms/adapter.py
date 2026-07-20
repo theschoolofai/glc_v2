@@ -15,9 +15,11 @@ Environment variables (live usage):
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 from datetime import UTC, datetime
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -36,6 +38,43 @@ AttachmentKind = Literal["image", "audio", "video", "file"]
 _STOP_KEYWORDS = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}
 _START_KEYWORDS = {"START", "YES", "UNSTOP"}
 _HELP_KEYWORDS = {"HELP", "INFO"}
+
+
+# Hosts that legitimately serve Twilio-hosted MMS media. Only these ever
+# receive the account's Basic-Auth credentials (finding #78).
+_TWILIO_MEDIA_SUFFIXES = (".twilio.com", ".twiliocdn.com")
+_TWILIO_MEDIA_HOSTS = frozenset({"api.twilio.com", "media.twiliocdn.com"})
+
+
+def _is_twilio_media_host(host: str) -> bool:
+    h = (host or "").strip().lower().rstrip(".")
+    if h in _TWILIO_MEDIA_HOSTS:
+        return True
+    return any(h.endswith(suffix) for suffix in _TWILIO_MEDIA_SUFFIXES)
+
+
+def _is_blocked_host(host: str) -> bool:
+    """SSRF guard: block loopback/private/link-local/reserved targets.
+
+    Blocks the obvious internal hostnames and any host given as a literal
+    IP in a non-public range. Public hostnames pass (DNS-rebinding is out
+    of scope for a static allowlist, but private literals are the common
+    MediaUrl SSRF vector)."""
+    h = (host or "").strip().lower().rstrip(".")
+    if not h or h == "localhost" or h.endswith(".localhost") or h.endswith(".internal"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h.strip("[]"))
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
 
 
 def _media_kind(content_type: str) -> AttachmentKind:
@@ -291,14 +330,45 @@ class Adapter(ChannelAdapter):
             base = self.config.get("artifact_public_base") or os.environ.get("GLC_ARTIFACT_PUBLIC_BASE", "")
             if base:
                 sha = ref.removeprefix("art:")
-                return f"{base.rstrip('/')}/{sha}"
+                # Embed the signed read token so the artifact route (which now
+                # rejects unauthenticated reads, finding #46) will serve it.
+                from .artifacts import access_token
+
+                return f"{base.rstrip('/')}/{sha}?token={access_token(sha)}"
         return None
 
     async def _download_media(self, url: str) -> bytes:
-        """Download Twilio-hosted MMS media using Basic Auth."""
-        account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
-        auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, auth=(account_sid, auth_token))
+        """Download MMS media safely.
+
+        Twilio's `MediaUrl` is attacker-influenced: a malicious sender can
+        make Twilio deliver a webhook whose MediaUrl points anywhere. The
+        prior implementation blindly attached the live Twilio auth token
+        (Basic Auth) to *every* URL, leaking it to attacker-named hosts, and
+        happily fetched internal/loopback targets (SSRF). Hardened here:
+
+          - reject non-http(s) schemes and SSRF-prone hosts (loopback,
+            private, link-local, reserved, literal-IP internal ranges);
+          - attach the account's Basic-Auth credentials ONLY when the host
+            is a genuine Twilio media host — never to third-party hosts;
+          - do not follow redirects (a 3xx could bounce creds off-Twilio).
+        """
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"refusing non-http(s) media URL: {url!r}")
+        host = parsed.hostname or ""
+        if not host:
+            raise ValueError(f"media URL has no host: {url!r}")
+        if _is_blocked_host(host):
+            raise ValueError(f"refusing SSRF-prone media host: {host!r}")
+
+        auth: tuple[str, str] | None = None
+        if _is_twilio_media_host(host):
+            account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+            auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+            if account_sid and auth_token:
+                auth = (account_sid, auth_token)
+
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            resp = await client.get(url, auth=auth)
             resp.raise_for_status()
             return resp.content

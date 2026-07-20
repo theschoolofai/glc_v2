@@ -23,7 +23,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from glc.channels.catalogue.gmail.adapter import Adapter
+from glc.channels.catalogue.gmail.adapter import Adapter, _verified_sender
 from glc.channels.catalogue.gmail.artifacts import cleanup_expired
 from glc.channels.envelope import ChannelReply
 from glc.security.pairing import get_pairing_store
@@ -162,9 +162,21 @@ def extract_sender(raw_b64: str) -> str | None:
 
 
 def extract_email_only(addr: str) -> str:
-    if "<" in addr and ">" in addr:
-        return addr.split("<")[1].split(">")[0]
-    return addr.strip()
+    # parseaddr returns the true angle-addr address, so a crafted display
+    # name like "owner@example.com <evil@attacker>" cannot smuggle the
+    # owner address into the trust classifier (finding #88).
+    from email.utils import parseaddr
+
+    return parseaddr(addr or "")[1].strip()
+
+
+def verified_sender_only(raw_b64: str, from_header: str | None) -> str | None:
+    """Bare From address only if the MTA authenticated it, else None (#8)."""
+    padded = raw_b64 + "=" * (-len(raw_b64) % 4)
+    raw_bytes = base64.urlsafe_b64decode(padded.encode())
+    parser = BytesParser(policy=email_policy.default)
+    email_msg = parser.parsebytes(raw_bytes)
+    return _verified_sender(email_msg, from_header or "")
 
 
 def extract_subject(raw_b64: str) -> str | None:
@@ -328,8 +340,11 @@ def main():
                         # Step 4: Extract sender + resolve trust (before expensive parsing)
                         print(f"  {BOLD}Step 4: _extract_email(From header) + _resolve_trust_level(){RESET}")
                         print(f'     {DIM}IN:{RESET}  From: "{sender}"')
-                        print(f'     {DIM}DO:{RESET}  Strip display name → "{sender_bare}"')
-                        trust = classify("gmail", sender_bare)
+                        print(f'     {DIM}DO:{RESET}  parseaddr -> "{sender_bare}"; verify Authentication-Results')
+                        # Trust only a sender the MTA authenticated (#8): an
+                        # unverified/spoofed From falls through to untrusted.
+                        verified_bare = verified_sender_only(raw_b64, sender)
+                        trust = classify("gmail", verified_bare) if verified_bare else "untrusted"
                         trust_color = (
                             GREEN if trust == "owner_paired" else YELLOW if trust == "user_paired" else RED
                         )
