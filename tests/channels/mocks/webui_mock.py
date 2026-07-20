@@ -29,9 +29,16 @@ STRANGER_ID = STRANGER_USER_ID
 OWNER_SESSION = "browser-owner-001"
 STRANGER_SESSION = "browser-guest-002"
 
+# A server-issued session token the WebUI mints only after the owner
+# authenticates. The client cannot forge it; the adapter must require it
+# before trusting the client's claimed user_id.
+OWNER_SESSION_TOKEN = "sess-owner-secret-token"
 
-def _user_message_frame(*, session_id: str, user_id: str, text: str) -> dict[str, Any]:
-    return {
+
+def _user_message_frame(
+    *, session_id: str, user_id: str, text: str, session_token: str | None = None
+) -> dict[str, Any]:
+    frame = {
         "type": "user_message",
         "session_id": session_id,
         "user_id": user_id,
@@ -40,6 +47,9 @@ def _user_message_frame(*, session_id: str, user_id: str, text: str) -> dict[str
         "attachments": [],
         "client_ts": 1700000000000,
     }
+    if session_token is not None:
+        frame["session_token"] = session_token
+    return frame
 
 
 @dataclass
@@ -48,14 +58,37 @@ class WebuiMock:
     send_log: list[dict[str, Any]] = field(default_factory=list)
     rate_limited: bool = False
     _disconnect_pending: bool = False
+    # Server-side binding of issued session tokens -> authenticated user_id.
+    session_tokens: dict[str, str] = field(
+        default_factory=lambda: {OWNER_SESSION_TOKEN: OWNER_USER_ID}
+    )
+
+    def verify_session(self, session_token: str | None) -> str | None:
+        """Return the user_id the server bound to this token, or None."""
+        if not session_token:
+            return None
+        return self.session_tokens.get(session_token)
 
     def queue_owner_message(self, text: str = "hello") -> dict[str, Any]:
-        ev = _user_message_frame(session_id=OWNER_SESSION, user_id=OWNER_USER_ID, text=text)
+        # Genuine owner: the frame carries the server-issued session token.
+        ev = _user_message_frame(
+            session_id=OWNER_SESSION,
+            user_id=OWNER_USER_ID,
+            text=text,
+            session_token=OWNER_SESSION_TOKEN,
+        )
         self.inbound_events.append(ev)
         return ev
 
     def queue_stranger_message(self, text: str = "ping") -> dict[str, Any]:
+        # Guest with no authenticated session token.
         ev = _user_message_frame(session_id=STRANGER_SESSION, user_id=STRANGER_USER_ID, text=text)
+        self.inbound_events.append(ev)
+        return ev
+
+    def queue_spoofed_owner_message(self, text: str = "i am the owner") -> dict[str, Any]:
+        """A client claiming user_id='owner' with NO valid session token."""
+        ev = _user_message_frame(session_id="browser-attacker-003", user_id=OWNER_USER_ID, text=text)
         self.inbound_events.append(ev)
         return ev
 

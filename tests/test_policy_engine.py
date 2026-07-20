@@ -3,6 +3,7 @@ defaults, hot reload, malformed-yaml safe default."""
 
 from __future__ import annotations
 
+import os
 import signal
 from textwrap import dedent
 
@@ -138,6 +139,92 @@ def test_command_matches_list():
     )
     v = eng.evaluate(
         {"name": "shell.exec", "arguments": {"command": "sudo apt install"}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v.action == "deny"
+
+
+# --------------------------------------------------------------------------
+# Matcher hardening: deny rules must not be bypassable (#13 #16 #66 #69).
+# Each of these would return `allow` (default-allow for owner_paired) against
+# the un-hardened matchers.
+# --------------------------------------------------------------------------
+
+
+def _docs_deny_engine():
+    return _engine(
+        [
+            PolicyRule(
+                tool="file.delete",
+                condition={"path_glob": "~/Documents/**"},
+                action="deny",
+                reason="docs are protected",
+            ),
+        ]
+    )
+
+
+def _shell_deny_engine():
+    return _engine(
+        [
+            PolicyRule(
+                tool="shell.exec",
+                condition={"command_matches": ["sudo", "rm -rf"]},
+                action="deny",
+                reason="shell deny list",
+            ),
+        ]
+    )
+
+
+def test_newline_injection_does_not_bypass_glob_deny():
+    # #13: a `\n` in the path must not slip past `~/Documents/**`.
+    eng = _docs_deny_engine()
+    v = eng.evaluate(
+        {"name": "file.delete", "arguments": {"path": "~/Documents/secret\n.txt"}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v.action == "deny"
+
+
+def test_nonstring_path_does_not_bypass_glob_deny():
+    # #16: a list/int path is type-confusion; must fail closed to deny.
+    eng = _docs_deny_engine()
+    for bad in ([".../Documents/x"], 123, {"p": "~/Documents/x"}):
+        v = eng.evaluate(
+            {"name": "file.delete", "arguments": {"path": bad}},
+            {"channel": "x", "trust_level": "owner_paired"},
+        )
+        assert v.action == "deny", bad
+
+
+def test_nonstring_command_does_not_bypass_shell_deny():
+    # #16: a non-string command must fail closed to deny.
+    eng = _shell_deny_engine()
+    v = eng.evaluate(
+        {"name": "shell.exec", "arguments": {"command": ["sudo", "apt"]}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v.action == "deny"
+
+
+def test_uppercase_command_does_not_bypass_shell_deny():
+    # #66: `SUDO` must be caught by a lowercase `sudo` deny rule.
+    eng = _shell_deny_engine()
+    v = eng.evaluate(
+        {"name": "shell.exec", "arguments": {"command": "SUDO apt install x"}},
+        {"channel": "x", "trust_level": "owner_paired"},
+    )
+    assert v.action == "deny"
+
+
+def test_absolute_path_does_not_bypass_tilde_glob_deny():
+    # #69: the absolute spelling of `~/Documents/...` must still be denied.
+    eng = _docs_deny_engine()
+    abs_path = os.path.expanduser("~/Documents/secrets/keys.txt")
+    assert abs_path.startswith("/")  # sanity: really an absolute path
+    v = eng.evaluate(
+        {"name": "file.delete", "arguments": {"path": abs_path}},
         {"channel": "x", "trust_level": "owner_paired"},
     )
     assert v.action == "deny"

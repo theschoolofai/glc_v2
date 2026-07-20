@@ -50,8 +50,29 @@ def _matches_glob(value: Any, pattern: str) -> bool:
     # fnmatch's ** support is weak; substitute ** for a regex-ish pattern.
     if "**" in pattern:
         regex = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
-        return bool(re.match(regex + "$", value))
+        # #13: fullmatch + DOTALL anchors the WHOLE string and lets ``.*`` cross
+        # newlines, so a `\n` injected into the value can't evade the deny rule.
+        return bool(re.fullmatch(regex, value, re.DOTALL))
+    # fnmatch.translate anchors with \Z and enables DOTALL, so it is already
+    # newline-safe.
     return fnmatch.fnmatch(value, pattern)
+
+
+def _matches_regex(value: Any, pattern: str) -> bool:
+    # #16: fail CLOSED on non-string (see _matches_glob).
+    if not isinstance(value, str):
+        raise TypeError(f"regex condition expected str, got {type(value).__name__}")
+    # #13: DOTALL so a `\n` in the value can't hide content from the pattern.
+    return bool(re.search(pattern, value, re.DOTALL))
+
+
+def _command_matches(command: Any, patterns: list[Any]) -> bool:
+    # #16: fail CLOSED on non-string command.
+    if not isinstance(command, str):
+        raise TypeError(f"command_matches expected str, got {type(command).__name__}")
+    # #66: casefold both sides so `SUDO` can't bypass a lowercase deny rule.
+    haystack = command.casefold()
+    return any(str(p).casefold() in haystack for p in patterns)
 
 
 def _matches_condition(condition: dict[str, Any], params: dict[str, Any]) -> bool:
@@ -62,19 +83,15 @@ def _matches_condition(condition: dict[str, Any], params: dict[str, Any]) -> boo
                 return False
         elif key.endswith("_regex"):
             target = key[: -len("_regex")]
-            val = params.get(target)
-            if not isinstance(val, str) or not re.search(expected, val):
+            if not _matches_regex(params.get(target), expected):
                 return False
         elif key.endswith("_in"):
             target = key[: -len("_in")]
             if params.get(target) not in (expected or []):
                 return False
         elif key == "command_matches":
-            cmd = params.get("command", "")
-            if not isinstance(cmd, str):
-                return False
             patterns = expected if isinstance(expected, list) else [expected]
-            if not any(p in cmd for p in patterns):
+            if not _command_matches(params.get("command"), patterns):
                 return False
         elif key == "recipient_type":
             if params.get("recipient_type") != expected:
@@ -127,7 +144,15 @@ class PolicyEngine:
                 continue
             if rule.trust_level != "*" and rule.trust_level != trust_level:
                 continue
-            if rule.condition and not _matches_condition(rule.condition, params):
+            try:
+                condition_ok = not rule.condition or _matches_condition(rule.condition, params)
+            except TypeError:
+                # #16: a matcher got a non-string arg where a string was
+                # required (glob / regex / command). Fail CLOSED — treat the
+                # condition as satisfied so a deny rule still fires instead of
+                # falling through to default-allow.
+                condition_ok = True
+            if not condition_ok:
                 continue
             if first_match is None:
                 first_match = (i, rule)

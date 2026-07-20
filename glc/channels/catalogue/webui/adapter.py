@@ -25,6 +25,36 @@ class Adapter(ChannelAdapter):
         self.mock = self.config.get("mock")
         self.is_public_channel = self.config.get("is_public_channel", False)
 
+    def _verify_session(self, session_token: str | None) -> str | None:
+        """Resolve a server-issued session token to the user_id the server
+        bound to it, or None if the token is missing/unknown.
+
+        Resolution order:
+          - mock's ``verify_session`` (test transport), else
+          - ``config["session_tokens"]`` mapping {token: user_id}, else
+          - ``config["verify_session"]`` callable {token -> user_id | None}.
+        A bare user_id with no valid token can never be verified this way.
+        """
+        if not session_token:
+            return None
+        mock = self.mock
+        if mock is not None and hasattr(mock, "verify_session"):
+            return mock.verify_session(session_token)
+        table = self.config.get("session_tokens")
+        if isinstance(table, dict):
+            return table.get(session_token)
+        verifier = self.config.get("verify_session")
+        if callable(verifier):
+            return verifier(session_token)
+        return None
+
+    def _authenticated_user_id(self, session_token: str | None, claimed_user_id: str) -> str | None:
+        """Return claimed_user_id only if a valid session token is bound to it."""
+        verified = self._verify_session(session_token)
+        if verified is not None and verified == claimed_user_id:
+            return claimed_user_id
+        return None
+
     async def on_message(self, raw: Any) -> ChannelMessage:
         """Convert incoming WebSocket frame to ChannelMessage."""
 
@@ -57,13 +87,23 @@ class Adapter(ChannelAdapter):
         text = raw.get("text")
         attachments = raw.get("attachments", [])
         client_ts = raw.get("client_ts")
+        session_token = raw.get("session_token")
 
         # Step 3: Validate required fields
         if not user_id or not text:
             return None
 
-        # Step 4: Determine trust level
-        trust_level = classify("webui", user_id)
+        # Step 4: Determine trust level.
+        #
+        # A bare, client-supplied `user_id` proves nothing — a browser can
+        # put any string there and claim to be the owner (finding #50).
+        # Trust is only ever derived from an identity the SERVER bound to a
+        # session at pairing/login time: we require a `session_token` that
+        # the server issued for exactly this `user_id`. Anything else (no
+        # token, forged token, token bound to a different user) fails closed
+        # to untrusted, while the message is still delivered for handling.
+        authenticated_user = self._authenticated_user_id(session_token, user_id)
+        trust_level = classify("webui", authenticated_user) if authenticated_user else "untrusted"
 
         # Step 5: Convert client timestamp (milliseconds) to datetime
         if client_ts:
