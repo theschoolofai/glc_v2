@@ -24,6 +24,56 @@ import yaml
 
 from glc.policy.schemas import PolicyConfig, PolicyRule, PolicyVerdict
 
+# Allowed tool name catalog
+# This is the authoritative list of tools that can be dispatched.
+# Any tool name not in this set is rejected by the policy engine.
+ALLOWED_TOOL_NAMES = {
+    # Standard MCP tools
+    "web_search",
+    "fetch_url",
+    "search_knowledge",
+    "index_document",
+    "list_dir",
+    "read_file",
+    "create_file",
+    "update_file",
+    "edit_file",
+
+    # Email tools
+    "email.send",
+    "email.read",
+    "email.delete",
+
+    # File tools
+    "file.read",
+    "file.write",
+    "file.delete",
+
+    # Calendar tools
+    "calendar.create",
+    "calendar.read",
+    "calendar.update",
+    "calendar.delete",
+
+    # Shell tools (high-risk, typically denied by policy)
+    "shell.exec",
+
+    # System tools
+    "system.info",
+}
+
+
+def _normalize_tool_name(tool: str) -> str:
+    """Normalize tool names to prevent bypasses.
+
+    - Convert to lowercase
+    - Strip whitespace
+    - This ensures "Shell.Exec" and "shell.exec " are treated as "shell.exec"
+    """
+    if not isinstance(tool, str):
+        return ""
+    return tool.lower().strip()
+
 _SAFE_DEFAULT = PolicyConfig(
     rules=[
         PolicyRule(
@@ -134,10 +184,22 @@ class PolicyEngine:
         """tool_call = {'name': 'email.send', 'arguments': {...}}
         context   = {'channel': 'telegram', 'trust_level': 'owner_paired',
                      'channel_user_id': '...'}"""
-        tool = tool_call.get("name", "")
+        tool_raw = tool_call.get("name", "")
         params = tool_call.get("arguments") or {}
         channel = context.get("channel", "")
         trust_level = context.get("trust_level", "untrusted")
+
+        # Normalize and validate tool name
+        tool = _normalize_tool_name(tool_raw)
+
+        # Reject tools not in the allowed catalog
+        if tool not in ALLOWED_TOOL_NAMES and tool != "*":
+            return PolicyVerdict(
+                action="deny",
+                reason=f"tool '{tool_raw}' is not in the allowed tool catalog. "
+                       f"Only registered tools can be executed.",
+                matched_rule_index=None
+            )
 
         with self._lock:
             rules = list(self.config.rules)
@@ -145,7 +207,9 @@ class PolicyEngine:
         deny_match: tuple[int, PolicyRule] | None = None
         first_match: tuple[int, PolicyRule] | None = None
         for i, rule in enumerate(rules):
-            if rule.tool != "*" and rule.tool != tool:
+            # Normalize rule tool name for comparison
+            rule_tool = _normalize_tool_name(rule.tool)
+            if rule_tool != "*" and rule_tool != tool:
                 continue
             if rule.channel != "*" and rule.channel != channel:
                 continue
