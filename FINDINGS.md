@@ -95,20 +95,32 @@ its own audit history · (8) enforceable limits on time/tokens/tool-calls/money.
 
 ---
 
-## Deployment residuals (cannot be closed in application code)
+## Deployment layer (`modal_app.py`)
 
-These need the Modal deployment topology, not a code change, and are the Session 13 /
-capstone concern. Documented here so the reference repo is honest about them:
+Closed at the Modal layer (the deploy code is in the repo, so these are fixed, not just documented):
 
-- **Leak 1 — shared-process secrets.** One Function with one Secret means every line of
-  in-process code can read every key. Closing it needs one container + one scoped Secret
-  per adapter. App code can't wall this off.
-- **Leak 5 / 7 — process isolation & shell.** Running the policy engine and each adapter
-  in their own process/container (and minimal images without a shell) is deployment-layer.
-  The app-layer matcher fixes above close the *reachable* bypasses; true isolation is the wall.
-- **A5 — reproducible image.** Build from `uv.lock` with the base pinned by digest in the
-  Modal image spec.
-- **A6 — audit mount isolation.** The hash chain makes tampering *detectable* in code; making
-  it *impossible* needs a read-only mount / gateway-only Volume.
-- **Full Teams Bot Framework JWT verification** (#4/#67) is stubbed with a structural check +
-  serviceUrl allowlist; complete JWKS signature verification belongs in a shared auth helper.
+- **A5 — reproducible image.** `modal_app.py` installs the exact `uv.lock` closure
+  (`uv export --frozen` → `uv pip install --system`), no floating `>=` ranges. Base is a
+  pinned Debian Bookworm + Python 3.11 slim; bump the digest deliberately.
+- **A6 — audit single-writer.** The gateway Function runs `max_containers=1`, so concurrent
+  SQLite writers can't split/corrupt the hash-chained audit log; the Volume is committed after writes.
+- **Secrets, never in git.** `GLC_API_TOKEN` / `GLC_CONTROL_TOKEN` come from a Modal Secret
+  (`glc-gateway-auth`) at runtime — created with `modal secret create`, never committed. The app
+  fails closed if they're unset, so the gateway is never exposed without them. **API tokens do not
+  belong on GitHub, and none are.**
+
+## Still open — needs app + deploy co-design (capstone scope)
+
+Honest about what one wrapper can't close:
+
+- **Leak 1 — shared-process secrets.** One process reading all provider keys from env can't be
+  walled off until the runtime dispatches each adapter to its own container with its own scoped
+  Secret. That's a routing change in the agent runtime, not a deploy flag.
+- **Leaks 5 / 7 — process isolation & egress.** The app-layer matcher and sink fixes close the
+  *reachable* bypasses; a true wall means running the policy engine and untrusted tool bodies in
+  their own gVisor Sandboxes with an outbound-domain allowlist. `modal_app.py` documents the
+  Sandbox shape (`untrusted_sandbox` note) but does not wire it, because the gateway does not yet
+  dispatch untrusted work off-process.
+- **Full Teams Bot Framework JWT verification** (#4/#67) is a structural check + serviceUrl
+  allowlist today; complete JWKS signature verification needs a `pyjwt` + `cryptography` dependency
+  (a lockfile change) and a shared auth helper.
