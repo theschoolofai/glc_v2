@@ -147,6 +147,13 @@ class Adapter(ChannelAdapter):
         # text-to-speech is opt-in per channel.
         body = DiscordCreateMessage(content=reply.text or "")
         payload = body.model_dump(exclude={"tts"})
+        # Neutralise mention pings (#82). Discord's default `allowed_mentions`
+        # parses @everyone/@here, role and user mentions out of the message
+        # *content* and pings them — so untrusted reply text like "@everyone"
+        # or "<@&roleid>" would broadcast-ping a whole guild. An explicit empty
+        # parse list disables every mention-triggered ping; reply text is still
+        # delivered verbatim, it just can't ring anyone.
+        payload["allowed_mentions"] = {"parse": []}
         return await api.send(payload)
 
 

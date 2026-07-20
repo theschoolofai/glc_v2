@@ -47,9 +47,10 @@ def _set_secret(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
+    # #70: only signed webhooks are accepted, so feed a properly signed body.
     adapter = Adapter(config={"mock": mock})
-    ev = mock.queue_owner_message("hello from owner")
-    msg = await adapter.on_message(ev)
+    raw, headers = mock.queue_signed_webhook(text="hello from owner")
+    msg = await adapter.on_message({"raw_body": raw, "headers": headers})
     assert isinstance(msg, ChannelMessage)
     assert msg.channel == "whatsapp"
     assert msg.channel_user_id == OWNER_ID
@@ -61,8 +62,8 @@ async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
 @pytest.mark.asyncio
 async def test_on_message_stranger_is_untrusted(mock):
     adapter = Adapter(config={"mock": mock})
-    ev = mock.queue_stranger_message("hi")
-    msg = await adapter.on_message(ev)
+    raw, headers = mock.queue_signed_webhook(mock.queue_stranger_message("hi"))
+    msg = await adapter.on_message({"raw_body": raw, "headers": headers})
     assert msg is not None
     assert msg.channel_user_id == STRANGER_ID
     assert msg.trust_level == "untrusted"
@@ -89,8 +90,9 @@ async def test_send_emits_valid_wire_payload(mock, pair_owner):
 async def test_disconnect_is_handled(mock, pair_owner):
     adapter = Adapter(config={"mock": mock})
     mock.force_disconnect()
+    raw, headers = mock.queue_signed_webhook(text="after disconnect")
     try:
-        await adapter.on_message(mock.queue_owner_message("after disconnect"))
+        await adapter.on_message({"raw_body": raw, "headers": headers})
     except Exception as e:
         pytest.fail(f"adapter did not handle disconnect cleanly: {e!r}")
 
@@ -108,8 +110,8 @@ async def test_rate_limit_propagates_429(mock, pair_owner):
 @pytest.mark.asyncio
 async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
-    ev = mock.queue_stranger_message("hi from public")
-    msg = await adapter.on_message(ev)
+    raw, headers = mock.queue_signed_webhook(mock.queue_stranger_message("hi from public"))
+    msg = await adapter.on_message({"raw_body": raw, "headers": headers})
     assert msg is None or msg.trust_level == "untrusted"
 
 
