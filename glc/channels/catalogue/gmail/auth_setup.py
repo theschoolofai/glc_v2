@@ -17,6 +17,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+from glc.channels.catalogue.gmail.token_store import write_token_file
+
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 DIR = Path(__file__).parent
 CREDENTIALS_FILE = DIR / "credentials.json"
@@ -75,8 +77,7 @@ def authenticate() -> Credentials:
             flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
         creds = flow.run_local_server(port=0)
 
-    with open(TOKEN_FILE, "w") as f:
-        f.write(creds.to_json())
+    write_token_file(TOKEN_FILE, creds.to_json())
 
     print(f"Token saved to {TOKEN_FILE}")
     return creds

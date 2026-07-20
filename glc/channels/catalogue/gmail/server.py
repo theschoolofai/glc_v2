@@ -25,6 +25,7 @@ from googleapiclient.discovery import build
 
 from glc.channels.catalogue.gmail.adapter import Adapter, _verified_sender
 from glc.channels.catalogue.gmail.artifacts import cleanup_expired
+from glc.channels.catalogue.gmail.token_store import write_token_file
 from glc.channels.envelope import ChannelReply
 from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
@@ -96,8 +97,7 @@ def get_credentials() -> Credentials:
     creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
     if creds.expired and creds.refresh_token:
         creds.refresh(GoogleRequest())
-        with open(TOKEN_FILE, "w") as f:
-            f.write(creds.to_json())
+        write_token_file(TOKEN_FILE, creds.to_json())
     return creds
 
 
