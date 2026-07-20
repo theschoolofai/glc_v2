@@ -43,7 +43,7 @@ its own audit history · (8) enforceable limits on time/tokens/tool-calls/money.
 | 5 policy engine monkey-patch | 2/6 | **process-separation is deployment-layer**; app-layer matcher hardening below closes the reachable bypasses | ours |
 | 6 unbounded egress | 1 | app-layer SSRF allowlist on every server-side fetch (C1); full egress wall is the Modal Sandbox layer | ours |
 | 7 subprocess/shell | blast-radius | `say` sink fixed (#87); shell removal is per-component-image (deployment) | levelscorner #87 |
-| 8 `os.kill` / remote kill | 8 | `/v1/control/kill` no longer trusts peer IP; token-only, constant-time (see #72) | padmanabh #72 |
+| 8 `os.kill` / remote kill | 8 | `/v1/control/kill` requires the **operator control token** (constant-time) **and** a loopback peer — defense in depth. Remote kill stays blocked. | ours (control-token split from #37) |
 | 9 (= C2 above) | 2 | — | SairajMN #76 |
 | 10 cost-ledger poisoning | 8 | `db.log_call()` validates counts (non-negative, bounded, known provider); agent attributed server-side | raghu #19 |
 
@@ -72,7 +72,7 @@ its own audit history · (8) enforceable limits on time/tokens/tool-calls/money.
 | #64 | Sujthr | 1 | Telegram token stripped from attachment ref |
 | #65 | Sujthr | 2 | LINE mention gate applied to all senders |
 | #71 | padmanabh275 | 4 | ElevenLabs `voice_id` charset-validated (no traversal) |
-| #72 | padmanabh275 | 8 | `/v1/control/kill` token-only, ignores proxy peer IP |
+| ~~#72~~ | padmanabh275 | — | **Withdrawn — did not reproduce.** The claim was that Modal's ASGI proxy makes every caller appear as `127.0.0.1`, so the kill endpoint's loopback gate is a no-op. A live probe on Modal (2026-07-20) returned `client_host=106.51.64.44, is_loopback=false` — Modal passes the **real** caller IP. The gate works; the session's original board claim was correct. The fix was reverted and the loopback gate **restored** alongside the control token, with regression tests in `tests/test_control_plane.py`. |
 | #73 | padmanabh275 | 8 | `auto_route` HUGE-gate counts the `system` field |
 | #77 | akshatjaipuria | 3 | structured-retry sanitizes echoed model output |
 | #78 | tkAcharya | 1 | Twilio media creds only to Twilio hosts; SSRF-blocked |

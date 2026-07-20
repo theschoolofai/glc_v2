@@ -144,3 +144,35 @@ def test_replayed_nonce_is_rejected(app_client, control_token):
     assert first.status_code == 200
     replay = app_client.post("/v1/control/pair", headers=h, json=body)
     assert replay.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Regression: the kill endpoint keeps its loopback gate ON TOP of the control
+# token (defense in depth).
+#
+# PR #72 argued Modal's ASGI proxy makes every caller look like 127.0.0.1, so
+# the gate was removed. A live probe on Modal (2026-07-20) disproved that —
+# request.client.host reports the real caller IP — so the gate was restored.
+# These tests stop it from being dropped again on that false premise.
+# ---------------------------------------------------------------------------
+def test_kill_rejects_non_loopback_peer_even_with_valid_control_token(
+    app_client, control_token
+):
+    """TestClient presents host 'testclient' (not loopback), so a fully
+    authenticated kill must still be refused 403."""
+    r = app_client.post(
+        "/v1/control/kill",
+        headers={"Authorization": f"Bearer {control_token}", "X-Control-Nonce": _nonce()},
+    )
+    assert r.status_code == 403
+    assert "loopback" in r.text.lower()
+
+
+def test_kill_loopback_gate_is_checked_after_the_token(app_client):
+    """An unauthenticated caller must not learn the observed peer address."""
+    r = app_client.post(
+        "/v1/control/kill",
+        headers={"Authorization": "Bearer bogus", "X-Control-Nonce": _nonce()},
+    )
+    assert r.status_code in (401, 403)
+    assert "loopback" not in r.text.lower()

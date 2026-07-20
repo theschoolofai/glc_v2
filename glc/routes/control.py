@@ -214,11 +214,30 @@ async def kill(
     authorization: str | None = Header(default=None),
     x_control_nonce: str | None = Header(default=None),
 ):
-    # Authorization is the control token ONLY. The peer IP is deliberately
-    # not consulted: behind Modal's ASGI proxy every caller looks like
-    # loopback, so a 127.0.0.1 gate is trivially bypassed (#72).
+    # Defense in depth: the operator control token AND a loopback peer.
+    #
+    # PR #72 claimed Modal's ASGI proxy makes every caller appear as 127.0.0.1,
+    # rendering this gate a no-op. A live probe on Modal (2026-07-20) disproved
+    # that: request.client.host reports the real caller IP
+    # (e.g. "106.51.64.44", is_loopback=false). The gate is therefore effective
+    # and is kept. Set GLC_KILL_ALLOW_REMOTE=1 for a deliberate remote kill.
+    #
+    # Token is checked FIRST so an unauthenticated caller never learns the
+    # observed peer address from the 403 message below.
     _require_control_token(authorization)
     _require_nonce(x_control_nonce)
+
+    client_host = request.client.host if request.client else "unknown"
+    if os.getenv("GLC_KILL_ALLOW_REMOTE") != "1" and client_host not in (
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    ):
+        raise HTTPException(
+            403,
+            f"kill is restricted to loopback (got {client_host}). "
+            "Set GLC_KILL_ALLOW_REMOTE=1 to override (not recommended).",
+        )
 
     # Send SIGTERM to ourselves shortly after returning so the client gets a 200.
     import asyncio
