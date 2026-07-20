@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 
-def test_pair_without_token_is_unauthorized(app_client):
-    r = app_client.post("/v1/control/pair", json={"channel": "telegram", "channel_user_id": "1"})
+def test_pair_without_token_is_unauthorized(raw_client):
+    # raw_client carries no Authorization header. /v1/control/pair is not an
+    # edge-gated route, so this reaches the control plane's own token check.
+    r = raw_client.post("/v1/control/pair", json={"channel": "telegram", "channel_user_id": "1"})
     assert r.status_code == 401
 
 
