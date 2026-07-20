@@ -96,30 +96,55 @@ class PairingStore:
         return code, expires_at
 
     def confirm_code(self, code: str) -> PairingRecord | None:
-        with _conn() as c:
-            row = c.execute(
-                "SELECT * FROM pending_codes WHERE code=?",
-                (code,),
-            ).fetchone()
-            if row is None:
-                return None
-            if row["expires_at"] < time.time():
-                c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
-                return None
-            paired_at = time.time()
-            c.execute(
-                """INSERT OR REPLACE INTO pairings
-                   (channel, channel_user_id, user_handle, trust_level, paired_at)
-                   VALUES (?,?,?,?,?)""",
-                (
-                    row["channel"],
-                    row["channel_user_id"],
-                    row["user_handle"],
-                    row["requested_trust_level"],
-                    paired_at,
-                ),
-            )
-            c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
+        """Atomically claim and confirm a pending code.
+
+        Previously this ran SELECT / INSERT / DELETE under autocommit with
+        no guard, so two concurrent confirms of the same code could both
+        pass the SELECT and each insert a pairing (TOCTOU / double-confirm,
+        #20 — rraghu214). We now serialize on a process lock AND run the
+        whole thing inside a `BEGIN IMMEDIATE` transaction. The claim is
+        done delete-first: only the caller whose DELETE actually removes
+        the row (rowcount == 1) proceeds to insert the pairing; any racing
+        confirm sees rowcount == 0 and backs out.
+        """
+        with self._lock, _conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                row = c.execute(
+                    "SELECT * FROM pending_codes WHERE code=?",
+                    (code,),
+                ).fetchone()
+                if row is None:
+                    c.execute("COMMIT")
+                    return None
+                if row["expires_at"] < time.time():
+                    c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
+                    c.execute("COMMIT")
+                    return None
+                # Atomic claim: delete the pending code first and confirm we
+                # were the one to remove it. If a concurrent confirm already
+                # claimed it, rowcount is 0 and we do not create a pairing.
+                cur = c.execute("DELETE FROM pending_codes WHERE code=?", (code,))
+                if cur.rowcount == 0:
+                    c.execute("COMMIT")
+                    return None
+                paired_at = time.time()
+                c.execute(
+                    """INSERT OR REPLACE INTO pairings
+                       (channel, channel_user_id, user_handle, trust_level, paired_at)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        row["channel"],
+                        row["channel_user_id"],
+                        row["user_handle"],
+                        row["requested_trust_level"],
+                        paired_at,
+                    ),
+                )
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
             return PairingRecord(
                 channel=row["channel"],
                 channel_user_id=row["channel_user_id"],
