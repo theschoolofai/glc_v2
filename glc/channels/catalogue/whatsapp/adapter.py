@@ -265,6 +265,14 @@ class Adapter(ChannelAdapter):
         parsed: MetaParsed | TwilioParsed | None = None
         provider = "meta"
 
+        # #70: fail closed. The ONLY accepted inbound shape is a raw request
+        # (raw bytes + headers) whose signature we can verify — Meta's
+        # X-Hub-Signature-256 (HMAC-SHA256 over the body) or Twilio's
+        # X-Twilio-Signature. The previous bare-dict branches (`raw["entry"]`
+        # for Meta, `raw["From"]`/`raw["Body"]` for Twilio) accepted forged,
+        # unsigned payloads from anyone who could reach the webhook URL — a full
+        # HMAC bypass. They are gone: an envelope is built only after a verified
+        # signature.
         if isinstance(raw, dict) and "raw_body" in raw:
             raw_body = raw["raw_body"]
             if not isinstance(raw_body, bytes):
@@ -290,12 +298,6 @@ class Adapter(ChannelAdapter):
                 provider = "meta"
             else:
                 return None
-        elif isinstance(raw, dict) and raw.get("entry"):
-            parsed = parse_meta_payload(raw)
-            provider = "meta"
-        elif isinstance(raw, dict) and "From" in raw and "Body" in raw:
-            parsed = parse_twilio_payload(raw, datetime.now(UTC))
-            provider = "twilio"
         else:
             return None
 

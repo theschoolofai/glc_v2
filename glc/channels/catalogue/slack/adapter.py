@@ -23,6 +23,19 @@ from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.trust_level import classify
 
 
+def _escape_slack(text: str) -> str:
+    """Escape Slack mrkdwn control characters in untrusted reply text (#86).
+
+    Slack parses control sequences delimited by ``<`` … ``>`` out of message
+    text — ``<!channel>``/``<!here>``/``<!everyone>`` broadcast-ping the whole
+    conversation, ``<@U123>`` pings a user, ``<http://evil|label>`` masks a
+    phishing link. Per Slack's own guidance the three characters ``& < >`` are
+    the only ones that must be escaped; doing so makes every such sequence
+    render as literal text instead of firing. Escape ``&`` first so the ``<``
+    / ``>`` replacements don't double-encode it."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 class Adapter(ChannelAdapter):
     name = "slack"
 
@@ -106,7 +119,7 @@ class Adapter(ChannelAdapter):
 
         body: dict[str, Any] = {
             "channel": channel_id,
-            "text": reply.text,
+            "text": _escape_slack(reply.text) if reply.text else reply.text,
         }
 
         # Thread continuity: propagate thread_id back as thread_ts

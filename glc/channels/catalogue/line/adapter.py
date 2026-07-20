@@ -34,6 +34,7 @@ from typing import Any, Literal, Protocol, overload
 from glc.channels.base import ChannelAdapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.allowlists import allowed
+from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
 
 from .schemas import LineEvent
@@ -142,10 +143,17 @@ class Adapter(ChannelAdapter):
                 self._set_local_reply_token(parsed.user_id, parsed.reply_token)
 
         trust_level = classify(self.name, parsed.user_id)
-        if self.config.get("is_public_channel") and trust_level == "untrusted":
+        # #65: run the public-channel mention/allowlist gate for ALL senders,
+        # not just `untrusted` ones. The old `trust_level == "untrusted"` guard
+        # let a paired (owner/user) sender bypass the mention-only-in-public
+        # rule that the signal/discord siblings enforce unconditionally. Owners
+        # are passed in as owner_ids so the allowlist can still admit them.
+        if self.config.get("is_public_channel"):
+            owner_ids = [r.channel_user_id for r in get_pairing_store().owners(self.name)]
             ok, _ = allowed(
                 self.name,
                 parsed.user_id,
+                owner_ids=owner_ids,
                 is_public_channel=True,
                 was_mentioned=bool(self.config.get("was_mentioned", False)),
             )
