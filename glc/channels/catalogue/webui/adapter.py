@@ -7,12 +7,16 @@ for the standard workflow.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
 from glc.channels.base import ChannelAdapter
+from glc.channels.catalogue.webui.sessions import resolve_session
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.trust_level import classify
+
+_ART_REF_RE = re.compile(r"^art:[a-f0-9]{16,64}$")
 
 
 class Adapter(ChannelAdapter):
@@ -52,15 +56,28 @@ class Adapter(ChannelAdapter):
             return None
 
         session_id = raw.get("session_id")
-        user_id = raw.get("user_id")
         user_handle = raw.get("user_handle", "unknown")
         text = raw.get("text")
         attachments = raw.get("attachments", [])
         client_ts = raw.get("client_ts")
 
-        # Step 3: Validate required fields
+        # Step 3: Resolve the real identity from the server-side session
+        # registry -- never from the frame's own `user_id` field. That
+        # field is client-asserted; before this fix it was trusted
+        # directly, so any WebSocket client could claim to be the owner
+        # just by putting the owner's id in the message body. An unknown/
+        # unauthenticated session_id means we drop the message rather
+        # than guess who sent it.
+        user_id = resolve_session(session_id)
         if not user_id or not text:
             return None
+
+        # Step 3b: attachment refs are also client-asserted. Only accept
+        # the canonical `art:<hex>` handle shape every other channel's
+        # own artifact store issues -- anything else could be an attempt
+        # to smuggle an arbitrary string into a field downstream code
+        # may treat as a trusted internal handle.
+        attachments = [a for a in attachments if _ART_REF_RE.match(str(a.get("ref", "")))]
 
         # Step 4: Determine trust level
         trust_level = classify("webui", user_id)

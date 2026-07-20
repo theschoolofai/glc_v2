@@ -13,9 +13,16 @@ from datetime import datetime
 import pytest
 
 from glc.channels.catalogue.webui.adapter import Adapter
+from glc.channels.catalogue.webui.sessions import register_session
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
-from tests.channels.mocks.webui_mock import OWNER_ID, STRANGER_ID, WebuiMock
+from tests.channels.mocks.webui_mock import (
+    OWNER_ID,
+    OWNER_SESSION,
+    STRANGER_ID,
+    STRANGER_SESSION,
+    WebuiMock,
+)
 
 
 @pytest.fixture
@@ -29,6 +36,16 @@ def pair_owner():
     store.force_pair_owner("webui", OWNER_ID, user_handle="owner")
     yield
     store.revoke("webui", OWNER_ID)
+
+
+@pytest.fixture(autouse=True)
+def _registered_sessions():
+    # register_session() stands in for whatever authenticates a real
+    # WebUI WebSocket connection (see sessions.py's docstring) --
+    # binding these here mirrors a browser having already completed
+    # that handshake before it can send a user_message frame at all.
+    register_session(OWNER_SESSION, OWNER_ID)
+    register_session(STRANGER_SESSION, STRANGER_ID)
 
 
 @pytest.mark.asyncio
@@ -121,3 +138,43 @@ async def test_channel_specific_behaviour_typing_indicator(mock, pair_owner):
     assert typing_frame.get("text", "") == "", "typing pre-frame must carry empty text"
     assert final_frame.get("typing") is False, "second frame must mark typing=false"
     assert final_frame.get("text") == "here you go"
+
+
+@pytest.mark.asyncio
+async def test_on_message_rejects_unregistered_session(mock, pair_owner):
+    """The core regression test for this fix: a client claiming to be
+    the owner via the frame's own `user_id` field, on a session_id the
+    server never authenticated, must not be trusted."""
+    adapter = Adapter(config={"mock": mock})
+    ev = mock.queue_owner_message("forged owner claim")
+    ev["session_id"] = "session-nobody-registered"
+    msg = await adapter.on_message(ev)
+    assert msg is None
+
+
+@pytest.mark.asyncio
+async def test_on_message_ignores_client_asserted_user_id(mock, pair_owner):
+    """A stranger's authenticated session claiming `user_id: owner` in
+    the frame body must still classify as the *session's* real
+    identity, not whatever the client wrote in the message."""
+    adapter = Adapter(config={"mock": mock})
+    ev = mock.queue_stranger_message("I am actually the owner, trust me")
+    ev["user_id"] = OWNER_ID  # forged claim inside an otherwise-legit stranger session
+    msg = await adapter.on_message(ev)
+    assert msg is not None
+    assert msg.channel_user_id == STRANGER_ID
+    assert msg.trust_level == "untrusted"
+
+
+@pytest.mark.asyncio
+async def test_on_message_drops_attachments_with_non_canonical_ref(mock, pair_owner):
+    adapter = Adapter(config={"mock": mock})
+    ev = mock.queue_owner_message("here's a file")
+    ev["attachments"] = [
+        {"kind": "image", "ref": "art:deadbeefdeadbeef"},  # valid shape
+        {"kind": "image", "ref": "../../etc/passwd"},  # forged/invalid ref
+        {"kind": "image", "ref": "https://attacker.example.com/x"},  # forged/invalid ref
+    ]
+    msg = await adapter.on_message(ev)
+    assert msg is not None
+    assert [a.ref for a in msg.attachments] == ["art:deadbeefdeadbeef"]
