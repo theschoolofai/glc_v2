@@ -23,20 +23,25 @@ class GeminiCache:
         self._lock = asyncio.Lock()
 
     @staticmethod
-    def _key(model: str, text: str) -> str:
+    def _key(model: str, text: str, agent: str = "") -> str:
+        # Invariant 5: include agent identifier so different agents never share
+        # the same cache entry — each tenant's cached content has separate
+        # provenance and cannot bleed into another agent's context.
         h = hashlib.sha256()
         h.update(model.encode())
+        h.update(b"\x00")
+        h.update(agent.encode())
         h.update(b"\x00")
         h.update(text.encode())
         return h.hexdigest()
 
     async def get_or_create(
-        self, api_key: str, model: str, text: str, base_url: str
+        self, api_key: str, model: str, text: str, base_url: str, agent: str = ""
     ) -> tuple[str | None, int]:
         """Returns (cache_resource_name|None, cache_creation_input_tokens).
         cache_creation_input_tokens is non-zero only when we mint a fresh entry.
         """
-        key = self._key(model, text)
+        key = self._key(model, text, agent)
         now = time.time()
         async with self._lock:
             if key in self._store:
