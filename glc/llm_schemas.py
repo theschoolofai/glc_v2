@@ -125,12 +125,21 @@ class ChatResponse(BaseModel):
     retries: int = 0
 
 
+#: Hard ceilings for the batch endpoint (#5 BugD / #22). Without them a single
+#: request can fan out unboundedly and amplify load against upstream providers.
+MAX_BATCH_CALLS = 64
+MAX_BATCH_CONCURRENCY = 16
+
+
 class BatchChatRequest(BaseModel):
     """V8 batch endpoint. The gateway dispatches the inner calls with
-    bounded parallelism so providers' rate limits are respected centrally."""
+    bounded parallelism so providers' rate limits are respected centrally.
 
-    calls: list[ChatRequest]
-    max_concurrency: int = 4
+    ``calls`` and ``max_concurrency`` are capped so the endpoint cannot be
+    used as a request-amplifier (#5 BugD / #22)."""
+
+    calls: list[ChatRequest] = Field(min_length=1, max_length=MAX_BATCH_CALLS)
+    max_concurrency: int = Field(default=4, ge=1, le=MAX_BATCH_CONCURRENCY)
 
 
 class VisionRequest(BaseModel):
