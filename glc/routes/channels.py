@@ -10,6 +10,19 @@ processes incoming messages through the rate limiter, allowlist,
 trust-level classifier, policy engine, and (eventually) the agent
 runtime. For S11 the agent runtime is a stub that echoes the message
 back so adapter authors can verify their wire is plumbed correctly.
+
+Hardening notes (Session 12):
+  - #76  the envelope's declared `channel` must equal the route name.
+  - #17  the install token is compared in constant time.
+  - #27  the registered-channel set is ref-counted, cleaned on disconnect
+         and capped.
+  - #10/#48/#77A  the wire-supplied `trust_level` is discarded and
+         re-derived server-side per message.
+  - #90  channel ownership is re-read per message (revocation TOCTOU).
+  - #47  the public-channel mention gate is derived server-side; caller
+         metadata claims are recorded, never trusted for the gate.
+  - #5B  webhook verification fails closed when the token is unconfigured.
+  - #42  the webhook POST body is streamed with a hard size cap.
 """
 
 from __future__ import annotations
@@ -24,12 +37,99 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from glc.audit import append as audit_append
 from glc.channels import registry
 from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.config import get_or_create_install_token
+from glc.config import get_or_create_install_token, load_channels
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
+from glc.security.trust_level import derive_trust_level
 
 router = APIRouter()
+
+# Cap on the number of distinct channel names tracked in app.state so a
+# stream of connections under distinct names cannot grow it without bound
+# (finding #27).
+MAX_REGISTERED_CHANNELS = 256
+
+# Hard ceiling on a webhook POST body before we buffer it (finding #42).
+MAX_WEBHOOK_BODY_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+
+# --------------------------------------------------------------------------
+# registered-channel bookkeeping (#27)
+# --------------------------------------------------------------------------
+def _register_channel(state, name: str) -> bool:
+    """Ref-count a live connection for `name`. Returns False if adding a new
+    distinct channel would exceed the cap (connection should be refused)."""
+    counts = getattr(state, "registered_channel_counts", None)
+    if counts is None:
+        counts = {}
+    if name not in counts and len(counts) >= MAX_REGISTERED_CHANNELS:
+        return False
+    counts[name] = counts.get(name, 0) + 1
+    state.registered_channel_counts = counts
+    state.registered_channels = list(counts.keys())
+    return True
+
+
+def _unregister_channel(state, name: str) -> None:
+    counts = getattr(state, "registered_channel_counts", None) or {}
+    if name in counts:
+        counts[name] -= 1
+        if counts[name] <= 0:
+            del counts[name]
+    state.registered_channel_counts = counts
+    state.registered_channels = list(counts.keys())
+
+
+# --------------------------------------------------------------------------
+# server-side mention-gate derivation (#47)
+# --------------------------------------------------------------------------
+def _channel_cfg(name: str) -> tuple[dict, dict]:
+    cfg = load_channels()
+    defaults = cfg.get("defaults") or {}
+    ch = (cfg.get("channels") or {}).get(name) or {}
+    return defaults, ch
+
+
+def _is_public_channel(name: str) -> bool:
+    """Whether `name` is a public (multi-party) channel. Derived from
+    channels.yaml, NOT from caller-supplied metadata — a caller must not be
+    able to downgrade a public channel to private to skip the mention gate."""
+    defaults, ch = _channel_cfg(name)
+    return bool(ch.get("is_public", defaults.get("is_public", False)))
+
+
+def _server_was_mentioned(name: str, env: ChannelMessage) -> bool:
+    """Server-derived mention signal. We scan the message text for the
+    channel's configured `mention_tokens`. If none are configured we cannot
+    verify a mention, so we fail closed (return False) rather than trust the
+    caller's `metadata.was_mentioned`."""
+    defaults, ch = _channel_cfg(name)
+    tokens = ch.get("mention_tokens", defaults.get("mention_tokens", [])) or []
+    text = env.text or ""
+    return any(tok and tok in text for tok in tokens)
+
+
+def _derive_gate(name: str, env: ChannelMessage) -> tuple[bool, bool]:
+    """Return (is_public, was_mentioned) derived server-side, and audit any
+    caller-supplied claim so a spoof attempt is visible even though ignored."""
+    is_public = _is_public_channel(name)
+    was_mentioned = _server_was_mentioned(name, env)
+    md = env.metadata or {}
+    if "was_mentioned" in md or "is_public_channel" in md:
+        audit_append(
+            channel=name,
+            channel_user_id=env.channel_user_id,
+            trust_level=env.trust_level,
+            event_type="mention_claim_ignored",
+            result={
+                "claimed_was_mentioned": bool(md.get("was_mentioned", False)),
+                "claimed_is_public_channel": bool(md.get("is_public_channel", False)),
+                "server_was_mentioned": was_mentioned,
+                "server_is_public_channel": is_public,
+            },
+        )
+    return is_public, was_mentioned
 
 
 @router.websocket("/v1/channels/{name}")
@@ -41,20 +141,20 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
     elif token:
         presented = token
     expected = get_or_create_install_token()
-    if presented != expected:
+    # #17: constant-time comparison; reject a missing token without leaking
+    # timing about how much of it matched.
+    if presented is None or not hmac.compare_digest(presented, expected):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     await websocket.accept()
     state = websocket.app.state
-    registered = list(getattr(state, "registered_channels", []))
-    if name not in registered:
-        registered.append(name)
-        state.registered_channels = registered
+    if not _register_channel(state, name):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()
-    owners = [p.channel_user_id for p in pairings.owners(channel=name)]
 
     try:
         while True:
@@ -66,12 +166,37 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            # #76: the envelope must speak for the channel it connected as.
+            # A message whose declared channel differs from the route name
+            # is a spoof — record it and drop the connection.
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level="untrusted",
+                    event_type="channel_mismatch",
+                    result={"route": name, "declared_channel": env.channel},
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
+            # #10/#48/#77A: never trust wire-supplied trust_level. Re-derive
+            # from the pairing store and overwrite before any gate reads it.
+            env = env.with_server_trust(derive_trust_level(env.channel, env.channel_user_id))
+
+            # #90: re-read owners every message so a revocation mid-connection
+            # takes effect immediately (TOCTOU on the connect-time snapshot).
+            owners = [p.channel_user_id for p in pairings.owners(channel=name)]
+
+            # #47: mention gate derived server-side; caller metadata ignored.
+            is_public, was_mentioned = _derive_gate(name, env)
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
                 owner_ids=owners,
-                is_public_channel=bool(env.metadata.get("is_public_channel", False)),
-                was_mentioned=bool(env.metadata.get("was_mentioned", False)),
+                is_public_channel=is_public,
+                was_mentioned=was_mentioned,
             )
             if not ok:
                 audit_append(
@@ -115,7 +240,11 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
             )
             await websocket.send_text(reply.model_dump_json())
     except WebSocketDisconnect:
-        return
+        pass
+    finally:
+        # #27: release our ref-count so the channel drops out of state when
+        # the last live connection for it closes.
+        _unregister_channel(state, name)
 
 
 @router.get("/v1/channels/{name}/webhook")
@@ -125,9 +254,27 @@ async def channel_webhook_verify(name: str, request: Request):
     token = params.get("hub.verify_token", "")
     challenge = params.get("hub.challenge", "")
     expected = os.environ.get(f"{name.upper()}_VERIFY_TOKEN", "")
-    if mode == "subscribe" and hmac.compare_digest(token, expected):
+    # #5B: fail CLOSED when the verify token is unset/empty. Otherwise
+    # compare_digest('', '') is True and any caller (with no token) passes.
+    if not expected:
+        raise HTTPException(status_code=403)
+    if mode == "subscribe" and token and hmac.compare_digest(token, expected):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403)
+
+
+async def _read_body_capped(request: Request, limit: int) -> bytes:
+    """Stream the request body, aborting with 413 the moment it exceeds
+    `limit`. This avoids buffering an unbounded body into memory (#42)."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail="request body too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            raise HTTPException(status_code=413, detail="request body too large")
+    return bytes(body)
 
 
 @router.post("/v1/channels/{name}/webhook")
@@ -138,7 +285,7 @@ async def channel_webhook(name: str, request: Request):
         raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
 
     raw = {
-        "raw_body": await request.body(),
+        "raw_body": await _read_body_capped(request, MAX_WEBHOOK_BODY_BYTES),
         "headers": dict(request.headers),
     }
     msg = await adapter.on_message(raw)
@@ -149,12 +296,19 @@ async def channel_webhook(name: str, request: Request):
     pairings = get_pairing_store()
     owners = [p.channel_user_id for p in pairings.owners(channel=name)]
 
+    # #10/#48/#77A: re-derive trust server-side here too.
+    msg = msg.with_server_trust(derive_trust_level(msg.channel, msg.channel_user_id))
+
+    # #47: public-ness is derived from config, not from the message metadata.
+    is_public = _is_public_channel(name)
+    was_mentioned = bool((msg.metadata or {}).get("was_mentioned", False)) and is_public
+
     ok, why = allowed(
         msg.channel,
         msg.channel_user_id,
         owner_ids=owners,
-        is_public_channel=bool(msg.metadata.get("is_public_channel", False)),
-        was_mentioned=bool(msg.metadata.get("was_mentioned", False)),
+        is_public_channel=is_public,
+        was_mentioned=was_mentioned,
     )
     if not ok:
         audit_append(

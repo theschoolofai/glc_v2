@@ -19,6 +19,31 @@ from glc.security.trust_level import classify
 
 from .schemas import TelegramUpdate
 
+# Characters Telegram requires be backslash-escaped in MarkdownV2 text
+# (https://core.telegram.org/bots/api#markdownv2-style).
+_MARKDOWN_V2_SPECIAL = set(r"_*[]()~`>#+-=|{}.!")
+
+
+def _escape_markdown_v2(text: str) -> str:
+    """Escape untrusted text so it is rendered literally under
+    ``parse_mode=MarkdownV2`` (#85). Without this, reply text can carry
+    ``[label](http://evil)`` masked-phishing links, and *benign* text with a
+    lone ``.`` or ``!`` makes Telegram reject the whole send (400) — a
+    reply-drop DoS. Escaping every reserved char neutralises both."""
+    return "".join("\\" + c if c in _MARKDOWN_V2_SPECIAL else c for c in text)
+
+
+def _telegram_file_ref(file_path: str) -> str:
+    """Token-free handle for a Telegram file attachment (#64).
+
+    The real download URL is
+    ``https://api.telegram.org/file/bot<TOKEN>/<file_path>``. That URL was
+    being placed on the Attachment ``ref`` and echoed back to the caller,
+    leaking the bot token. We surface only the path; the gateway reattaches
+    the token from ``TELEGRAM_BOT_TOKEN`` at download time, so the secret
+    never crosses the adapter boundary."""
+    return f"tg-file:{file_path}"
+
 
 class Adapter(ChannelAdapter):
     name = "telegram"
@@ -110,7 +135,9 @@ class Adapter(ChannelAdapter):
                                     res_json = resp.json()
                                     if res_json.get("ok"):
                                         file_path = res_json["result"].get("file_path", "")
-                                        ref = f"https://api.telegram.org/file/bot{token}/{file_path}"
+                                        # #64: never embed the bot token in the
+                                        # ref — it is surfaced to the caller.
+                                        ref = _telegram_file_ref(file_path)
                         except Exception:
                             pass
 
@@ -151,7 +178,9 @@ class Adapter(ChannelAdapter):
             "chat_id": int(reply.channel_user_id)
             if reply.channel_user_id.isdigit()
             else reply.channel_user_id,
-            "text": reply.text or "",
+            # #85: escape for MarkdownV2 so untrusted reply text can't inject
+            # masked links or trip a parse error that drops the reply.
+            "text": _escape_markdown_v2(reply.text or ""),
             "parse_mode": "MarkdownV2",
         }
 

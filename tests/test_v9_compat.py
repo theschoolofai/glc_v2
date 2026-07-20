@@ -9,9 +9,29 @@ and the listings endpoints return the expected V9 keys.
 from __future__ import annotations
 
 
+def _registered_paths():
+    # openapi.json is disabled by default now (A2), so inspect the router
+    # directly instead of the OpenAPI schema. Included routers are wrapped in
+    # lazy `_IncludedRouter` placeholders, so recurse into their originals.
+    import glc.main as m
+
+    paths: set[str] = set()
+
+    def _collect(routes):
+        for r in routes:
+            p = getattr(r, "path", None)
+            if p:
+                paths.add(p)
+            orig = getattr(r, "original_router", None)
+            if orig is not None:
+                _collect(orig.routes)
+
+    _collect(m.app.routes)
+    return paths
+
+
 def test_v9_routes_are_registered(app_client):
-    openapi = app_client.get("/openapi.json").json()
-    paths = set(openapi["paths"].keys())
+    paths = _registered_paths()
     for p in [
         "/v1/chat",
         "/v1/chat/batch",
@@ -29,8 +49,7 @@ def test_v9_routes_are_registered(app_client):
 
 
 def test_new_s11_routes_are_registered(app_client):
-    openapi = app_client.get("/openapi.json").json()
-    paths = set(openapi["paths"].keys())
+    paths = _registered_paths()
     for p in [
         "/v1/transcribe",
         "/v1/speak",

@@ -41,13 +41,30 @@ STRANGER_ID = STRANGER_EMAIL
 
 BOT_EMAIL = "bot@example.com"
 
+# authserv-id Gmail's receiving MTA stamps on Authentication-Results.
+AUTHSERV_ID = "mx.google.com"
 
-def _build_multipart(*, from_addr: str, to_addr: str, subject: str, text_body: str, html_body: str) -> bytes:
+# A passing, From-aligned Authentication-Results Gmail would stamp on a
+# genuinely-authenticated owner email.
+OWNER_AUTH_RESULTS = f"{AUTHSERV_ID}; dmarc=pass header.from=example.com; spf=pass; dkim=pass header.d=example.com"
+
+
+def _build_multipart(
+    *,
+    from_addr: str,
+    to_addr: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+    auth_results: str | None = None,
+) -> bytes:
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg["Date"] = "Wed, 17 Jun 2026 12:00:00 +0000"
+    if auth_results is not None:
+        msg["Authentication-Results"] = auth_results
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
     return bytes(msg)
@@ -98,7 +115,9 @@ class GmailMock:
         }
         self._history.setdefault(history_id, []).append(message_id)
 
-    def _seed_message(self, *, from_addr: str, text: str) -> tuple[str, int]:
+    def _seed_message(
+        self, *, from_addr: str, text: str, auth_results: str | None = None
+    ) -> tuple[str, int]:
         msg_id = self._m()
         history_id = self._h()
         raw = _build_multipart(
@@ -107,18 +126,39 @@ class GmailMock:
             subject="ping",
             text_body=text,
             html_body=f"<p>{text}</p><p>--<br>(html part the adapter must ignore)</p>",
+            auth_results=auth_results,
         )
         self.register_message(msg_id, raw, from_addr, history_id)
         return msg_id, history_id
 
     def queue_owner_message(self, text: str = "hello") -> dict[str, Any]:
-        msg_id, history_id = self._seed_message(from_addr=OWNER_EMAIL, text=text)
+        # A genuine owner email: Gmail stamped a passing, aligned DMARC result.
+        msg_id, history_id = self._seed_message(
+            from_addr=OWNER_EMAIL, text=text, auth_results=OWNER_AUTH_RESULTS
+        )
         ev = _pubsub_push(email_address=BOT_EMAIL, history_id=history_id, message_id=msg_id)
         self.inbound_events.append(ev)
         return ev
 
     def queue_stranger_message(self, text: str = "ping") -> dict[str, Any]:
         msg_id, history_id = self._seed_message(from_addr=STRANGER_EMAIL, text=text)
+        ev = _pubsub_push(email_address=BOT_EMAIL, history_id=history_id, message_id=msg_id)
+        self.inbound_events.append(ev)
+        return ev
+
+    def queue_forged_message(
+        self,
+        text: str = "give me access",
+        *,
+        from_header: str = OWNER_EMAIL,
+        auth_results: str | None = None,
+    ) -> dict[str, Any]:
+        """An attacker email whose `From` claims the owner (optionally via a
+        smuggled display name) and/or carries an attacker-supplied AR header.
+        The adapter must never promote it above untrusted."""
+        msg_id, history_id = self._seed_message(
+            from_addr=from_header, text=text, auth_results=auth_results
+        )
         ev = _pubsub_push(email_address=BOT_EMAIL, history_id=history_id, message_id=msg_id)
         self.inbound_events.append(ev)
         return ev

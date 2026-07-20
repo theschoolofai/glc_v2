@@ -156,6 +156,15 @@ class Adapter(ChannelAdapter):
         if not mxc:
             return [], None
 
+        # #84: the url is sender-controlled. Only genuine Matrix content URIs
+        # (mxc://) are safe to hand on — anything else (file://, http://,
+        # http://169.254.169.254/... etc.) is an SSRF / local-file-read
+        # primitive once a downstream consumer dereferences it. Require the
+        # scheme and drop the attachment otherwise.
+        if not (isinstance(mxc, str) and mxc.startswith("mxc://")):
+            logger.warning("matrix: dropping media attachment with non-mxc url scheme")
+            return [], None
+
         ref = mxc
         if mock is not None and hasattr(mock, "download_media"):
             # Resolve mxc:// → bytes and persist by reference. The agent

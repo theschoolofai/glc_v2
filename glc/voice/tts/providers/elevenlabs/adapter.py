@@ -28,6 +28,18 @@ from glc.voice.tts.providers.elevenlabs.schemas import ElevenLabsRequest
 DEFAULT_VOICE_ID = "eoIFRkuKCeTGYlRFffIU"
 ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
+# #71: voice_id is interpolated into the upstream URL. Restrict it to the
+# alphanumeric id charset ElevenLabs actually uses so a value like
+# "../voices" or "..%2Fusage" cannot traverse the path and redirect the
+# xi-api-key header to a different API endpoint (confused deputy).
+_VOICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_voice_id(voice_id: str) -> str:
+    if not isinstance(voice_id, str) or not _VOICE_ID_RE.fullmatch(voice_id):
+        raise TTSError(f"invalid voice_id: {voice_id!r}", status=400)
+    return voice_id
+
 
 class Provider(TTSProvider):
     name = "elevenlabs"
@@ -102,6 +114,7 @@ class Provider(TTSProvider):
         Body     : ElevenLabsRequest(text=text).model_dump(exclude_none=True)
         Return   : response.content  (raw MP3 bytes)
         """
+        voice_id = _validate_voice_id(voice_id)
         url = ELEVENLABS_TTS_URL.format(voice_id=voice_id)
         headers = {"xi-api-key": self._api_key}
         body = ElevenLabsRequest(text=text).model_dump(exclude_none=True)

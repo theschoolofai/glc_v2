@@ -22,7 +22,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 from pydantic import ValidationError
 
@@ -72,6 +72,11 @@ class Adapter(ChannelAdapter):
         # would let concurrent calls clobber each other. Each stream's caller
         # is registered on its `start` frame and evicted on `stop`.
         self._stream_callers: dict[str, dict[str, str]] = {}
+        # #63: bound the registry. A `stop` frame is what evicts an entry, but a
+        # `start` with no matching `stop` (dropped WS, spoofed frames) would
+        # otherwise leak one dict entry per call forever. Cap the size and evict
+        # the oldest entry (insertion-ordered dict) when the cap is exceeded.
+        self._max_stream_callers: int = max(1, int(self.config.get("max_stream_callers", 1024)))
 
         # Optional buffered transcription (opt-in; default off keeps the
         # per-frame behaviour the official tests assert). When enabled, media
@@ -253,6 +258,11 @@ class Adapter(ChannelAdapter):
         caller = params.get("caller", "")
         handle = params.get("handle") or caller
         self._stream_callers[frame.start.streamSid] = {"id": caller, "handle": handle}
+        # #63: enforce the registry cap, evicting the oldest streams first.
+        while len(self._stream_callers) > self._max_stream_callers:
+            oldest = next(iter(self._stream_callers))
+            self._stream_callers.pop(oldest, None)
+            self._stream_buffers.pop(oldest, None)
         return ChannelMessage(
             channel=self.name,
             channel_user_id=caller,
@@ -420,18 +430,24 @@ class Adapter(ChannelAdapter):
 
     def _build_twiml(self, reply: ChannelReply) -> str:
         stream_url = self.config.get("stream_url", DEFAULT_STREAM_URL)
+        # `escape()` handles element *text* (< > &) but NOT the quote char, so a
+        # value like `+1"/><Say>pwned</Say>` breaks out of the attribute and
+        # injects TwiML verbs (#81). `quoteattr()` escapes the quotes too and
+        # returns the value already wrapped in quotes — so attributes use it
+        # directly, with no surrounding quotes of our own.
         say = f"<Say>{escape(reply.text)}</Say>" if reply.text else ""
         # Pass the caller as a <Parameter> so Twilio echoes it back in the
         # stream's `start` frame — that's how the caller-less media stream
         # learns whose audio it is. <Connect> must be immediately followed by
         # <Stream> so Twilio opens the bidirectional Media Streams WebSocket.
-        caller = escape(reply.channel_user_id)
+        caller_attr = quoteattr(reply.channel_user_id)
+        url_attr = quoteattr(stream_url)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
             "<Response>"
             f"{say}"
-            f'<Connect><Stream url="{escape(stream_url)}">'
-            f'<Parameter name="caller" value="{caller}"/>'
+            f"<Connect><Stream url={url_attr}>"
+            f"<Parameter name=\"caller\" value={caller_attr}/>"
             "</Stream></Connect>"
             "</Response>"
         )

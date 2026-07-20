@@ -3,6 +3,7 @@ defaults, hot reload, malformed-yaml safe default."""
 
 from __future__ import annotations
 
+import os
 import signal
 from textwrap import dedent
 

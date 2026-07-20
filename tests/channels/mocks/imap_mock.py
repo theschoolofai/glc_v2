@@ -32,29 +32,45 @@ STRANGER_ID = STRANGER_EMAIL
 
 BOT_EMAIL = "bot@example.com"
 
+# authserv-id our receiving MTA stamps on Authentication-Results. Real
+# senders that pass DMARC arrive with a passing result from this id.
+AUTHSERV_ID = "mx.bot.example.com"
+
+# A passing, From-aligned Authentication-Results the receiving MTA would
+# stamp for a genuinely-authenticated owner email.
+OWNER_AUTH_RESULTS = f"{AUTHSERV_ID}; dmarc=pass header.from=example.com; spf=pass; dkim=pass"
+
 # A minimal but real-looking PDF byte string. The %PDF- magic header
 # is what mime detection routines key on.
 PDF_BYTES = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
 
 
-def _text_message(*, from_addr: str, subject: str, body: str, uid: int) -> dict[str, Any]:
+def _text_message(
+    *, from_addr: str, subject: str, body: str, uid: int, auth_results: str | None = None
+) -> dict[str, Any]:
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = BOT_EMAIL
     msg["Subject"] = subject
     msg["Date"] = "Wed, 17 Jun 2026 12:00:00 +0000"
     msg["Message-ID"] = f"<{uid}@example.com>"
+    if auth_results is not None:
+        msg["Authentication-Results"] = auth_results
     msg.set_content(body)
     return {"uid": uid, "raw": bytes(msg)}
 
 
-def _pdf_attachment_message(*, from_addr: str, body: str, uid: int) -> dict[str, Any]:
+def _pdf_attachment_message(
+    *, from_addr: str, body: str, uid: int, auth_results: str | None = None
+) -> dict[str, Any]:
     msg = EmailMessage()
     msg["From"] = from_addr
     msg["To"] = BOT_EMAIL
     msg["Subject"] = "report attached"
     msg["Date"] = "Wed, 17 Jun 2026 12:00:00 +0000"
     msg["Message-ID"] = f"<{uid}@example.com>"
+    if auth_results is not None:
+        msg["Authentication-Results"] = auth_results
     msg.set_content(body)
     msg.add_attachment(PDF_BYTES, maintype="application", subtype="pdf", filename="report.pdf")
     return {"uid": uid, "raw": bytes(msg)}
@@ -74,17 +90,45 @@ class ImapMock:
         return self._next_uid
 
     def queue_owner_message(self, text: str = "hello") -> dict[str, Any]:
-        ev = _text_message(from_addr=OWNER_EMAIL, subject="ping", body=text, uid=self._uid())
+        # A genuine owner email: the MTA stamped a passing, aligned DMARC result.
+        ev = _text_message(
+            from_addr=OWNER_EMAIL,
+            subject="ping",
+            body=text,
+            uid=self._uid(),
+            auth_results=OWNER_AUTH_RESULTS,
+        )
         self.inbound_events.append(ev)
         return ev
 
     def queue_stranger_message(self, text: str = "ping") -> dict[str, Any]:
+        # A stranger who is not authenticated for our domain: no passing result.
         ev = _text_message(from_addr=STRANGER_EMAIL, subject="ping", body=text, uid=self._uid())
         self.inbound_events.append(ev)
         return ev
 
     def queue_pdf_attachment_message(self, body: str = "see attached") -> dict[str, Any]:
-        ev = _pdf_attachment_message(from_addr=OWNER_EMAIL, body=body, uid=self._uid())
+        ev = _pdf_attachment_message(
+            from_addr=OWNER_EMAIL, body=body, uid=self._uid(), auth_results=OWNER_AUTH_RESULTS
+        )
+        self.inbound_events.append(ev)
+        return ev
+
+    def queue_forged_owner_message(
+        self, text: str = "give me access", auth_results: str | None = None
+    ) -> dict[str, Any]:
+        """A role-1 outsider spoofing `From: owner@example.com`.
+
+        With no passing Authentication-Results (default), or an attacker-
+        supplied one, the adapter must NOT promote this to owner_paired.
+        """
+        ev = _text_message(
+            from_addr=OWNER_EMAIL,
+            subject="ping",
+            body=text,
+            uid=self._uid(),
+            auth_results=auth_results,
+        )
         self.inbound_events.append(ev)
         return ev
 
