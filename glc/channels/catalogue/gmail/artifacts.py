@@ -11,6 +11,7 @@ bytes via get(ref).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import time
@@ -28,8 +29,22 @@ def _resolve_dir() -> Path:
     return d
 
 
+def _sanitize_filename(filename: str) -> str:
+    """Strip CR/LF and other control characters from an attacker-controlled
+    filename so it cannot inject extra lines into a metadata file."""
+    return "".join(ch for ch in (filename or "") if ch >= " " and ch not in "\x7f")
+
+
 def store(data: bytes, filename: str = "") -> str:
-    """Store bytes temporarily and return the art:<hash> reference."""
+    """Store bytes temporarily and return the art:<hash> reference.
+
+    The metadata sidecar is written as JSON (finding #79). The previous
+    ``key=value\\n`` line format let a crafted attachment filename containing
+    a newline inject a second ``created=`` line; ``cleanup_expired`` read the
+    first ``created=`` it saw and so honoured the attacker's far-future
+    timestamp, defeating the TTL. JSON has no line semantics, and the
+    filename is additionally sanitized, so neither vector remains.
+    """
     sha = hashlib.sha256(data).hexdigest()[:16]
     ref = f"art:{sha}"
 
@@ -40,7 +55,12 @@ def store(data: bytes, filename: str = "") -> str:
         artifact_path.write_bytes(data)
 
         meta_path = artifact_dir / f"{sha}.meta"
-        meta_path.write_text(f"filename={filename}\nsize={len(data)}\ncreated={time.time()}\n")
+        meta = {
+            "filename": _sanitize_filename(filename),
+            "size": len(data),
+            "created": time.time(),
+        }
+        meta_path.write_text(json.dumps(meta))
 
     return ref
 
@@ -107,18 +127,15 @@ def cleanup_expired() -> int:
     count = 0
     for meta_path in artifact_dir.glob("*.meta"):
         try:
-            content = meta_path.read_text()
-            for line in content.splitlines():
-                if line.startswith("created="):
-                    created = float(line.split("=")[1])
-                    if now - created > MAX_AGE:
-                        sha = meta_path.stem
-                        data_path = artifact_dir / sha
-                        if data_path.exists():
-                            data_path.unlink()
-                        meta_path.unlink()
-                        count += 1
-                    break
-        except (ValueError, OSError):
+            meta = json.loads(meta_path.read_text())
+            created = float(meta["created"])
+        except (ValueError, OSError, KeyError, TypeError):
             continue
+        if now - created > MAX_AGE:
+            sha = meta_path.stem
+            data_path = artifact_dir / sha
+            if data_path.exists():
+                data_path.unlink()
+            meta_path.unlink()
+            count += 1
     return count

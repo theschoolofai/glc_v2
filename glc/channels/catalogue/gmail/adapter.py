@@ -18,10 +18,12 @@ import base64
 import json
 import logging
 import os
+import re as _re
 from datetime import UTC, datetime
 from email import policy as email_policy
 from email.message import EmailMessage
 from email.parser import BytesParser
+from email.utils import parseaddr as _parseaddr
 from typing import Any, Literal, Protocol
 
 from glc.channels.base import ChannelAdapter
@@ -37,6 +39,78 @@ from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import TrustLevel, classify
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Sender verification (findings #8 and #88)
+#
+# #88: the naive `addr.split('<')[1].split('>')[0]` parse lets a crafted
+#      display name feed the trust classifier. `email.utils.parseaddr`
+#      returns the real routed address, so we classify on that alone.
+# #8:  even the real address in `From` is unauthenticated. We grant trust
+#      only when Gmail's MTA authenticated the From domain (a DMARC pass,
+#      or an aligned SPF+DKIM pass, in an Authentication-Results header).
+#      Absent that proof we fail closed to untrusted.
+# ──────────────────────────────────────────────────────────────────
+
+
+def _bare_address(addr: str) -> str:
+    """Real routed address from a `From` header (immune to display-name smuggling)."""
+    return _parseaddr(addr or "")[1].strip()
+
+
+def _addr_domain(addr: str) -> str:
+    return _bare_address(addr).rpartition("@")[2].strip().lower().rstrip(".")
+
+
+def _aligned(auth_domain: str, from_domain: str) -> bool:
+    a = (auth_domain or "").strip().lower().rstrip(".")
+    f = (from_domain or "").strip().lower().rstrip(".")
+    if not a or not f:
+        return False
+    return a == f or a.endswith("." + f) or f.endswith("." + a)
+
+
+def _ar_authserv_id(ar_value: str) -> str:
+    head = ar_value.split(";", 1)[0].strip()
+    return head.split()[0].lower() if head else ""
+
+
+def _ar_proves_domain(ar_value: str, from_domain: str) -> bool:
+    """True iff this Authentication-Results value authenticates *from_domain*
+    via a DMARC pass or an aligned SPF+DKIM pass. A DKIM/SPF pass for the
+    sender's own (misaligned) domain does not count."""
+    dmarc = _re.search(r"\bdmarc\s*=\s*(\w+)", ar_value, _re.I)
+    if dmarc and dmarc.group(1).lower() == "pass":
+        hf = _re.search(r"header\.from\s*=\s*([^\s;]+)", ar_value, _re.I)
+        if hf is None or _aligned(hf.group(1), from_domain):
+            return True
+    spf = _re.search(r"\bspf\s*=\s*(\w+)", ar_value, _re.I)
+    dkim = _re.search(r"\bdkim\s*=\s*(\w+)", ar_value, _re.I)
+    if spf and spf.group(1).lower() == "pass" and dkim and dkim.group(1).lower() == "pass":
+        dkd = _re.search(r"header\.d\s*=\s*([^\s;]+)", ar_value, _re.I)
+        spfd = _re.search(r"smtp\.mailfrom\s*=\s*([^\s;]+)", ar_value, _re.I)
+        dk_ok = dkd is not None and _aligned(dkd.group(1), from_domain)
+        spf_ok = spfd is not None and _aligned(spfd.group(1).rpartition("@")[2], from_domain)
+        if dk_ok and spf_ok:
+            return True
+    return False
+
+
+def _verified_sender(msg: Any, from_addr: str, *, trusted_authserv_ids: Any = None) -> str | None:
+    """Return the bare From address only when the MTA authenticated the From
+    domain; otherwise None (→ untrusted). ``trusted_authserv_ids``, when set,
+    pins which authserv-ids may vouch (defeats attacker-injected AR headers)."""
+    from_domain = _addr_domain(from_addr)
+    if not from_domain:
+        return None
+    trusted = {t.lower() for t in trusted_authserv_ids} if trusted_authserv_ids else None
+    for ar_value in msg.get_all("Authentication-Results") or []:
+        if trusted is not None and _ar_authserv_id(ar_value) not in trusted:
+            continue
+        if _ar_proves_domain(ar_value, from_domain):
+            return _bare_address(from_addr) or None
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -152,7 +226,7 @@ class Adapter(ChannelAdapter):
         # In public channel mode, the adapter consults the allowlist before
         # processing strangers (mention_only_in_public default), so untrusted
         # senders are dropped at the adapter level to avoid flooding the agent.
-        trust_level = self._resolve_trust_level(from_addr)
+        trust_level = self._resolve_trust_level(from_addr, email_msg)
 
         if self.config.get("is_public_channel") and not self._check_allowlist(from_addr, trust_level):
             return None  # type: ignore[return-value]
@@ -200,7 +274,7 @@ class Adapter(ChannelAdapter):
             from_addr_raw = email_msg["From"] or ""
             from_addr = self._extract_email(from_addr_raw)
 
-            trust_level = self._resolve_trust_level(from_addr)
+            trust_level = self._resolve_trust_level(from_addr, email_msg)
 
             if self.config.get("is_public_channel") and not self._check_allowlist(from_addr, trust_level):
                 continue
@@ -411,10 +485,14 @@ class Adapter(ChannelAdapter):
         return "file"
 
     def _extract_email(self, addr: str) -> str:
-        """Extract bare email from 'Display Name <email@x.com>' format."""
-        if "<" in addr and ">" in addr:
-            return addr.split("<")[1].split(">")[0]
-        return addr.strip()
+        """Extract the real routed email from a `From` header.
+
+        Uses ``email.utils.parseaddr`` rather than a naive ``split('<')``:
+        a crafted display name such as ``"owner@example.com <evil@attacker>"``
+        must never surface ``owner@example.com`` to the trust classifier
+        (finding #88). parseaddr returns the true angle-addr address.
+        """
+        return _bare_address(addr)
 
     # ──────────────────────────────────────────────────────────────────
     # Person 8 (Shwetha): Reply formatter
@@ -450,14 +528,28 @@ class Adapter(ChannelAdapter):
     # Person 10 (Vishy): Trust level + error handling helpers
     # ──────────────────────────────────────────────────────────────────
 
-    def _resolve_trust_level(self, sender_email: str) -> TrustLevel:
+    def _resolve_trust_level(self, sender_email: str, email_msg: Any = None) -> TrustLevel:
         """Determine trust level using the pairing store.
 
+        Trust is only ever derived from a sender the MTA *authenticated*
+        (finding #8): when ``email_msg`` is supplied we require a passing,
+        From-aligned Authentication-Results before classifying, and fail
+        closed to 'untrusted' otherwise.
+
         Returns:
-            'owner_paired' if sender is the channel owner
-            'user_paired' if sender is a paired user
-            'untrusted' for unknown senders
+            'owner_paired' if the verified sender is the channel owner
+            'user_paired' if the verified sender is a paired user
+            'untrusted' for unknown or unverified senders
         """
+        if email_msg is not None:
+            verified = _verified_sender(
+                email_msg,
+                sender_email,
+                trusted_authserv_ids=self.config.get("trusted_authserv_ids"),
+            )
+            if verified is None:
+                return "untrusted"
+            sender_email = verified
         return classify("gmail", sender_email)
 
     def _check_allowlist(self, sender_email: str, trust_level: str) -> bool:

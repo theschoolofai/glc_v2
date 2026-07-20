@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from glc.channels.catalogue.twilio_sms import artifacts
 from glc.channels.catalogue.twilio_sms.adapter import Adapter, _media_kind
 from glc.channels.catalogue.twilio_sms.schemas import TwilioInboundForm
 from glc.channels.envelope import Attachment, ChannelReply
@@ -63,7 +64,13 @@ async def test_outbound_art_ref_resolves_via_public_base(mock):
         attachments=[Attachment(kind="image", ref="art:abc123def4560000")],
     )
     await adapter.send(reply)
-    assert mock.send_log[-1].get("MediaUrl") == "https://cdn.example/art/abc123def4560000"
+    # The resolved MediaUrl now carries the signed read token (#46) so the
+    # artifact route (which rejects unauthenticated reads) will serve it.
+    expected_token = artifacts.access_token("abc123def4560000")
+    assert (
+        mock.send_log[-1].get("MediaUrl")
+        == f"https://cdn.example/art/abc123def4560000?token={expected_token}"
+    )
 
 
 async def test_outbound_unresolvable_art_ref_is_skipped_not_dropped(mock):

@@ -14,11 +14,13 @@ Key wire-format facts from the Bot Framework docs:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.catalogue.teams.schemas import ADAPTIVE_CARD_CONTENT_TYPE
@@ -27,9 +29,42 @@ from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
 
+_log = logging.getLogger("glc.teams.adapter")
+
 _MENTION_RE = re.compile(r"<at>[^<]*</at>\s*")
 
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}  # app_id -> (token, expires_at)
+
+# Hosts a Bot Framework serviceUrl is allowed to point at (#67). The Connector
+# service always lives under one of these; anything else is an attacker-supplied
+# target we must never POST a bearer token to (token exfil / SSRF). Suffix match
+# so regional subdomains (smba.trafficmanager.net, *.botframework.com) are covered.
+_DEFAULT_ALLOWED_SERVICE_HOSTS: tuple[str, ...] = (
+    "botframework.com",
+    "smba.trafficmanager.net",
+)
+
+
+def _service_url_allowed(url: str, allowed_hosts: tuple[str, ...]) -> bool:
+    """True if ``url``'s host is (a subdomain of) an allowlisted host, over
+    https. Fail closed on anything unparsable or off-scheme."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return any(host == h or host.endswith("." + h) for h in allowed_hosts)
+
+
+def _looks_like_jwt(token: str) -> bool:
+    """Structural check for a compact JWS: three non-empty dot-separated
+    segments. Not a signature verification — see the TODO in ``_authorized``."""
+    parts = token.split(".")
+    return len(parts) == 3 and all(parts)
 
 
 def _bfs_first_textblock(card: dict[str, Any]) -> str | None:
@@ -96,12 +131,64 @@ class Adapter(ChannelAdapter):
         super().__init__(config)
         # serviceUrl + conversation_id per sender; needed to address real replies.
         self._conv_cache: dict[str, dict[str, str]] = {}
+        # Hosts a serviceUrl may target before we send a bearer token to it (#67).
+        self._allowed_service_hosts: tuple[str, ...] = tuple(
+            self.config.get("allowed_service_url_hosts") or _DEFAULT_ALLOWED_SERVICE_HOSTS
+        )
+
+    def _authorized(self, raw: Any) -> bool:
+        """Verify the inbound Activity is genuinely from the Bot Framework
+        before trusting any of its fields (#4).
+
+        Bot Framework signs each inbound POST with a JWT in the
+        ``Authorization`` header. The adapter only receives the Activity JSON,
+        so the deployment HTTP layer must forward that header — under
+        ``raw['_authorization']`` (or ``raw['headers']['authorization']``).
+
+        Trust order:
+        - a caller-supplied ``jwt_verifier`` callable wins if configured;
+        - otherwise a present token must be structurally a JWT
+          (TODO: full verification against the Bot Framework OpenID JWKS —
+          issuer ``https://api.botframework.com``, audience = ``TEAMS_APP_ID``;
+          not done here to avoid adding a JWT dependency);
+        - with no token we fail closed, except for the trusted in-process test
+          transport (``mock``) or an explicit ``allow_unauthenticated`` opt-in
+          for local emulator use.
+        """
+        token = ""
+        if isinstance(raw, dict):
+            raw_auth = raw.get("_authorization") or (raw.get("headers") or {}).get("authorization") or ""
+            token = str(raw_auth)
+            if token.lower().startswith("bearer "):
+                token = token[7:].strip()
+
+        verifier = self.config.get("jwt_verifier")
+        if callable(verifier):
+            try:
+                return bool(verifier(token, raw))
+            except Exception:
+                _log.warning("teams: jwt_verifier raised; rejecting activity", exc_info=True)
+                return False
+
+        if token:
+            return _looks_like_jwt(token)
+
+        # No Authorization header on the wire.
+        if self.config.get("mock") is not None or self.config.get("allow_unauthenticated"):
+            return True
+        _log.warning("teams: rejecting unauthenticated inbound activity (no Bot Framework JWT)")
+        return False
 
     async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
         mock = self.config.get("mock")
 
         # Disconnect signal: log and return None so the gateway can reconnect.
         if mock is not None and mock.pop_disconnect():
+            return None
+
+        # Verify the Bot Framework JWT before trusting from.id / serviceUrl or
+        # any other Activity field (#4). Unauthenticated inbound is dropped.
+        if not self._authorized(raw):
             return None
 
         # Only process message activities; ignore typing, conversationUpdate, etc.
@@ -145,11 +232,18 @@ class Adapter(ChannelAdapter):
                     text = _bfs_first_textblock(card)
                 break  # first adaptive card wins
 
-        # Cache conversation context for outbound replies.
-        self._conv_cache[user_id] = {
-            "service_url": service_url,
-            "conversation_id": conversation_id,
-        }
+        # Cache conversation context for outbound replies — but only if the
+        # serviceUrl targets an allowlisted Bot Framework host (#67). Caching an
+        # attacker-controlled serviceUrl would later send a Connector bearer
+        # token there (token exfil / SSRF). A rejected serviceUrl simply isn't
+        # cached, so send() fails closed with "no cached context".
+        if service_url and _service_url_allowed(service_url, self._allowed_service_hosts):
+            self._conv_cache[user_id] = {
+                "service_url": service_url,
+                "conversation_id": conversation_id,
+            }
+        elif service_url:
+            _log.warning("teams: refusing to cache non-allowlisted serviceUrl for %s", user_id)
 
         ts_raw: str | None = raw.get("timestamp")
         arrived_at = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")) if ts_raw else datetime.now(UTC)
@@ -168,10 +262,14 @@ class Adapter(ChannelAdapter):
     async def send(self, reply: ChannelReply) -> Any:
         mock = self.config.get("mock")
 
+        # #89: send as plain text, not markdown. With textFormat="markdown"
+        # untrusted reply text like `[Reset password](http://evil)` renders as
+        # a masked phishing link in the Teams client; "plain" makes Teams show
+        # the text literally, so no link is fabricated from reply content.
         payload: dict[str, Any] = {
             "type": "message",
             "text": reply.text or "",
-            "textFormat": "markdown",
+            "textFormat": "plain",
         }
         if reply.thread_id:
             payload["replyToId"] = reply.thread_id
@@ -184,6 +282,13 @@ class Adapter(ChannelAdapter):
             raise RuntimeError(
                 f"no cached context for {reply.channel_user_id!r}; "
                 "call on_message for this user before send()"
+            )
+
+        # Defence in depth (#67): re-validate the serviceUrl host at send time
+        # before minting/attaching a Connector bearer token to a request there.
+        if not _service_url_allowed(ctx["service_url"], self._allowed_service_hosts):
+            raise RuntimeError(
+                f"teams: refusing to send to non-allowlisted serviceUrl {ctx['service_url']!r}"
             )
 
         import httpx
