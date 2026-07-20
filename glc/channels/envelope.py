@@ -40,6 +40,14 @@ class ChannelMessage(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    def with_server_trust(self, trust_level: TrustLevel) -> "ChannelMessage":
+        """Return a copy with `trust_level` overwritten by a server-derived
+        value. The wire-supplied trust_level is never authoritative (findings
+        #10 / #48 / #77A): a client could otherwise self-declare
+        `owner_paired`. The gateway recomputes trust from the pairing store on
+        ingress and stamps it here, discarding whatever the client sent."""
+        return self.model_copy(update={"trust_level": trust_level})
+
 
 class ChannelReply(BaseModel):
     channel: str
