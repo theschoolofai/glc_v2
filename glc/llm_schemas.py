@@ -141,6 +141,25 @@ class BatchChatRequest(BaseModel):
     calls: list[ChatRequest] = Field(min_length=1, max_length=MAX_BATCH_CALLS)
     max_concurrency: int = Field(default=4, ge=1, le=MAX_BATCH_CONCURRENCY)
 
+    # NEW-BUG-2 FIX: Validate batch size and concurrency at schema level
+    def model_post_init(self, __context) -> None:
+        MAX_BATCH_SIZE = 100
+        MAX_CONCURRENCY = 20
+
+        if len(self.calls) > MAX_BATCH_SIZE:
+            raise ValueError(
+                f"Batch size {len(self.calls)} exceeds maximum of {MAX_BATCH_SIZE}. "
+                f"Split large batches into multiple requests."
+            )
+
+        if self.max_concurrency > MAX_CONCURRENCY:
+            raise ValueError(
+                f"max_concurrency {self.max_concurrency} exceeds maximum of {MAX_CONCURRENCY}."
+            )
+
+        if self.max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
+
 
 class VisionRequest(BaseModel):
     """V9: typed shim for single-image vision calls. Lower-ceremony than

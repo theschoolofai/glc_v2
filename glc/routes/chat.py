@@ -802,7 +802,24 @@ async def chat(req: ChatRequest, request: Request):
 
 @router.post("/v1/chat/batch")
 async def chat_batch(req: BatchChatRequest, request: Request):
-    sem = _asyncio.Semaphore(max(1, req.max_concurrency))
+    # NEW-BUG-2 FIX: Validation is already done in BatchChatRequest.model_post_init()
+    # Additional runtime check as defense-in-depth
+    MAX_BATCH_SIZE = 100
+    MAX_CONCURRENCY = 20
+
+    if len(req.calls) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            400,
+            f"Batch size {len(req.calls)} exceeds maximum of {MAX_BATCH_SIZE}"
+        )
+
+    if req.max_concurrency > MAX_CONCURRENCY:
+        raise HTTPException(
+            400,
+            f"max_concurrency {req.max_concurrency} exceeds maximum of {MAX_CONCURRENCY}"
+        )
+
+    sem = _asyncio.Semaphore(max(1, min(req.max_concurrency, MAX_CONCURRENCY)))
 
     async def _one(call: ChatRequest):
         async with sem:
