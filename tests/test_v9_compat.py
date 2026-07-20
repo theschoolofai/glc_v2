@@ -111,3 +111,34 @@ def test_healthz(app_client):
     r = app_client.get("/healthz")
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+def test_chat_request_rejects_negative_max_tokens(app_client):
+    """Session 12 Part 2 finding: a negative max_tokens used to drive
+    _est_tokens' estimate negative, sailing past every provider's
+    max_ctx/TPM/RPD pre-check in Router.pick() before ever reaching a
+    provider. Must be rejected at the schema layer (422), never
+    dispatched."""
+    r = app_client.post("/v1/chat", json={"prompt": "hi", "max_tokens": -999999})
+    assert r.status_code == 422
+
+
+def test_chat_request_rejects_absurd_max_tokens(app_client):
+    """An unbounded max_tokens forwards unclamped into the outbound
+    max_tokens/maxOutputTokens param, requesting unbounded paid-provider
+    output — also invariant 8 (hard limits on tokens/cost)."""
+    r = app_client.post("/v1/chat", json={"prompt": "hi", "max_tokens": 10_000_000})
+    assert r.status_code == 422
+
+
+def test_chat_request_accepts_in_range_max_tokens(app_client):
+    r = app_client.post("/v1/chat", json={"prompt": "hi", "max_tokens": 4096})
+    assert r.status_code != 422
+
+
+def test_vision_request_rejects_negative_max_tokens(app_client):
+    r = app_client.post(
+        "/v1/vision",
+        json={"prompt": "describe", "image": "data:image/png;base64,aGVsbG8=", "max_tokens": -1},
+    )
+    assert r.status_code == 422
