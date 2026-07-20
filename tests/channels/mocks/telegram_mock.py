@@ -142,6 +142,14 @@ class TelegramMock:
             raise KeyError(f"unknown file_id: {file_id}")
         return dict(self._files[file_id])
 
+    async def download_file(self, file_id: str) -> bytes:
+        """Synthetic file bytes for the given file_id -- stands in for
+        actually downloading from api.telegram.org/file/bot<token>/...
+        in tests, so the adapter's artifact-store path is exercised for
+        real without a live token or network call."""
+        info = self._files.get(file_id, {})
+        return f"mock-photo-bytes:{info.get('file_path', file_id)}".encode()
+
     async def send(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.rate_limited:
             return {

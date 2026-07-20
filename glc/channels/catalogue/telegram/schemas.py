@@ -7,7 +7,23 @@ in glc.channels.envelope.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class StoredArtifact(BaseModel):
+    """Metadata sidecar for the local artifact store (mirrors the
+    twilio_sms/gmail/imap adapters' own copy of this model)."""
+
+    id: str  # art:<sha16>
+    content_type: str
+    size_bytes: int
+    source: str
+    descriptor: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class TelegramUser(BaseModel):

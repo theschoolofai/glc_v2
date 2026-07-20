@@ -21,6 +21,11 @@ from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.telegram_mock import OWNER_ID, STRANGER_ID, TelegramMock
 
 
+@pytest.fixture(autouse=True)
+def _isolated_artifacts_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("GLC_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+
+
 @pytest.fixture
 def mock():
     return TelegramMock()
@@ -113,9 +118,12 @@ async def test_channel_specific_behaviour_photo_attachment(mock, pair_owner):
     """A Telegram photo Update requires two steps. First, the adapter
     parses the `photo` array (an array of PhotoSize objects with
     `file_id`s for each rendered size). Second, it calls
-    `getFile(file_id)` to resolve the largest size to a `file_path`.
-    The Attachment.ref must encode the resolved file_path — adapters
-    that store the raw file_id without resolving fail this test.
+    `getFile(file_id)` to resolve the largest size to a `file_path`,
+    downloads the bytes, and stores them under an opaque `art:<sha16>`
+    handle. The Attachment.ref must be that handle — it must never be
+    (or contain) a Telegram URL, since a token-bearing URL would put the
+    live TELEGRAM_BOT_TOKEN on the envelope the agent runtime and audit
+    log see.
 
     https://core.telegram.org/bots/api#photosize
     https://core.telegram.org/bots/api#getfile"""
@@ -127,6 +135,13 @@ async def test_channel_specific_behaviour_photo_attachment(mock, pair_owner):
     assert len(msg.attachments) >= 1, "photo Update must produce at least one Attachment"
     img = next((a for a in msg.attachments if a.kind == "image"), None)
     assert img is not None, "photo Attachment must have kind='image'"
-    assert "photos/file_AgADBAADREALPHOTO" in img.ref, (
-        "Attachment.ref should encode the resolved file_path from getFile, not the raw file_id"
+    assert img.ref.startswith("art:"), "Attachment.ref must be an opaque art:<sha16> handle"
+    assert "telegram.org" not in img.ref and "bot" not in img.ref.split(":")[0], (
+        "Attachment.ref must never be (or contain) a Telegram URL / bot token"
     )
+
+    from glc.channels.catalogue.telegram import artifacts
+
+    stored = artifacts.get_bytes(img.ref)
+    assert stored is not None
+    assert b"AgADBAADREALPHOTO" in stored or b"photos/file_AgADBAADREALPHOTO" in stored

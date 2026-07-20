@@ -17,6 +17,7 @@ from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
 
+from . import artifacts
 from .schemas import TelegramUpdate
 
 
@@ -89,11 +90,20 @@ class Adapter(ChannelAdapter):
 
             file_id = largest.file_id
             if file_id:
+                # Resolve to our own opaque art:<sha16> handle instead of
+                # a token-bearing Telegram URL. The bot token must stay
+                # inside this function: it's used here (or by the mock)
+                # to fetch the bytes, then discarded -- it must never
+                # reach Attachment.ref, which is audited and handed to
+                # the agent runtime downstream.
                 ref = ""
                 if mock is not None:
                     try:
                         file_info = mock.get_file(file_id)
-                        ref = file_info.get("file_path", "")
+                        file_path = file_info.get("file_path", "")
+                        download = getattr(mock, "download_file", None)
+                        blob = await download(file_id) if download else file_path.encode()
+                        ref = artifacts.put(blob, content_type="image/jpeg", descriptor=file_path)
                     except Exception:
                         pass
                 else:
@@ -110,7 +120,18 @@ class Adapter(ChannelAdapter):
                                     res_json = resp.json()
                                     if res_json.get("ok"):
                                         file_path = res_json["result"].get("file_path", "")
-                                        ref = f"https://api.telegram.org/file/bot{token}/{file_path}"
+                                        dl = await client.get(
+                                            f"https://api.telegram.org/file/bot{token}/{file_path}",
+                                            timeout=10.0,
+                                        )
+                                        if dl.status_code == 200:
+                                            ref = artifacts.put(
+                                                dl.content,
+                                                content_type=dl.headers.get(
+                                                    "content-type", "image/jpeg"
+                                                ),
+                                                descriptor=file_path,
+                                            )
                         except Exception:
                             pass
 
