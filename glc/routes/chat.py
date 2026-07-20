@@ -258,33 +258,46 @@ def _system_blocks(req: ChatRequest):
     return [b.model_dump() if hasattr(b, "model_dump") else b for b in req.system]
 
 
-def _image_block_charcost(b: dict) -> int:
-    """Estimate the char-equivalent cost of an image block from its ACTUAL
-    payload size (#83). A flat per-image constant lets a multi-MB inline
-    image undercount and slip past the max_ctx / router size gate. We base
-    the estimate on the embedded byte size; base64 inflates ~4/3, so we
-    scale the decoded length. A small floor keeps tiny/thumbnail images
-    from scoring zero.
+def _flatten_system_text(system_blocks: Any) -> str:
+    """Flatten top-level system into text for auto_route sizing."""
+    if system_blocks is None:
+        return ""
+    if isinstance(system_blocks, str):
+        return system_blocks
+    if isinstance(system_blocks, list):
+        parts: list[str] = []
+        for b in system_blocks:
+            if isinstance(b, dict):
+                parts.append(str(b.get("text", "") or ""))
+            else:
+                parts.append(str(b))
+        return "\n".join(parts)
+    return str(system_blocks)
+
+
+def _message_text(messages: list[dict[str, Any]]) -> str:
+    return "".join(
+        (
+            P._extract_text_blocks(m.get("content", ""))
+            if isinstance(m.get("content"), list)
+            else str(m.get("content", ""))
+        )
+        for m in messages
+    )
+
+
+def _routing_text(messages: list[dict[str, Any]], system_blocks: Any) -> str:
+    """Full prompt text the auto_route classifier must size.
+
+    Worker calls include ``system``; routing used to size messages only, so a
+    huge ``system`` + short user prompt was mis-classified TINY and skipped
+    the HUGE 503 gate.
     """
-    payload_len = 0
-    btype = b.get("type")
-    if btype == "image_url":
-        iu = b.get("image_url")
-        url = iu.get("url") if isinstance(iu, dict) else iu
-        if isinstance(url, str):
-            payload_len = len(url)
-    elif btype in ("image", "input_image"):
-        src = b.get("source") or {}
-        if isinstance(src, dict) and src.get("data"):
-            payload_len = len(str(src.get("data")))
-        else:
-            url = b.get("url") or (src.get("url") if isinstance(src, dict) else None)
-            if isinstance(url, str):
-                payload_len = len(url)
-    # Decode base64/data-url overhead back to raw bytes, then map bytes to a
-    # char-equivalent so it flows through the existing `chars // 4` token math.
-    decoded_bytes = int(payload_len * 3 / 4)
-    return max(1200, decoded_bytes)
+    system_text = _flatten_system_text(system_blocks)
+    msg_text = _message_text(messages)
+    if system_text and msg_text:
+        return system_text + "\n" + msg_text
+    return system_text or msg_text
 
 
 def _est_tokens(messages, system_blocks, max_tokens):
@@ -488,14 +501,7 @@ async def chat(req: ChatRequest, request: Request):
     if any(P._content_has_image(m.get("content")) for m in messages):
         messages = await _resolve_image_urls(messages)
     system_blocks = _system_blocks(req)
-    prompt_text = "".join(
-        (
-            P._extract_text_blocks(m.get("content", ""))
-            if isinstance(m.get("content"), list)
-            else str(m.get("content", ""))
-        )
-        for m in messages
-    )
+    prompt_text = _routing_text(messages, system_blocks)
     est = _est_tokens(messages, system_blocks, req.max_tokens)
     explicit_override = bool(req.provider)
     required_caps = _required_caps(req)
