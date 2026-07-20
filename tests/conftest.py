@@ -35,6 +35,12 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.audit.store as _a
 
     _a._singleton = None
+
+    # Fresh control-plane nonce store so a nonce used in one test does not
+    # collide with another test's.
+    import glc.routes.control as _ctl
+
+    _ctl._nonce_store = _ctl._NonceStore()
     yield
 
 
@@ -55,3 +61,12 @@ def install_token(app_client):
     from glc.config import install_token_path
 
     return install_token_path().read_text().strip()
+
+
+@pytest.fixture
+def control_token(app_client):
+    """Returns the operator CONTROL token (distinct from the install token),
+    creating it under the test config dir on first access."""
+    from glc.routes.control import get_or_create_control_token
+
+    return get_or_create_control_token()
