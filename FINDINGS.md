@@ -99,23 +99,27 @@ Full per-adapter PID/minimal-image mesh (Moves 2–4 end state) not complete. Au
 ## Part 2 — new bugs (PR against `theschoolofai/glc_v2`)
 
 PR **required**. Must not restate §6/§7. Must break an eight-invariant. First PR wins.
+Graded so far: **Part 1 500/500 · Part 2 0/500** (empty-verify PR = duplicate of PR #5).
 
-### File this — Bug A: empty webhook verify
+### Scored 0 — do not refile
 
-- **Branch:** `part2/empty-webhook-verify` (from `upstream/main`)
-- **Bug:** `compare_digest("", "")` completes Meta-style subscribe with no `{CHANNEL}_VERIFY_TOKEN`
-- **Invariant:** auth / confused-deputy (Section 4 #2 family — paste exact name in PR)
-- **Repro:** `repro_empty_webhook_verify.sh`, `tests/test_empty_webhook_verify.py`
-- **Host:** empty verify → **403**
+| Attempt | Why 0 |
+|---------|-------|
+| Empty webhook verify (`compare_digest("", "")`) | Duplicate of **PR #5** (first-to-file). Fix valid; points to earliest filer. |
+| WhatsApp Meta HMAC replay / idempotency | **PR #37** already claimed (first-to-file); only control-token split scored there. |
+| HTTP / WS channel spoof | §6 C2 / §7 leak 9 |
+
+Close / ignore open duplicate PR #36 (`saitej123:bug_fix` conflicts + duplicate).
+
+### File this — Bug B: SSRF DNS-rebinding TOCTOU
+
+- **Branch:** `part2/ssrf-dns-rebind-pin` (from `upstream/main` @ `6087d8c`)
+- **Bug:** After C1, `fetch_bytes` still does `assert_safe_url` then `httpx.get(hostname)`. Safety check and TCP connect are different DNS lookups — attacker DNS can answer public then private/metadata (rebinding).
+- **Invariant:** Section 4 **TOCTOU** / confused-deputy egress residual (not the open-SSRF C1 itself — C1 never pinned the connect IP)
+- **Affected:** `glc/security/ssrf.py` `fetch_bytes` / new `pin_safe_url`
+- **Repro:** `repro_ssrf_dns_rebind.sh`, `tests/test_ssrf_dns_rebind.py`
+- **Fix:** Resolve once → pin public IP for connect → send `Host:` original name; re-pin every redirect hop
 - **Commands:** [`SUBMIT.md`](SUBMIT.md)
-
-### Do not PR
-
-HTTP webhook channel spoof → §7 leak 9 / §6 C2 family → likely 0 points.
-
-### Next 100 pts
-
-WhatsApp Meta HMAC **replay** (no message-id / freshness). Check open PRs first.
 
 ---
 
