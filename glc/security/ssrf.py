@@ -11,6 +11,11 @@ This module resolves the host to concrete IPs, rejects any address that
 is private / loopback / link-local / reserved (IPv4 *and* IPv6), and
 provides a fetch wrapper that follows redirects manually so every hop is
 re-validated.
+
+Validate-then-``httpx.get(hostname)`` is still a DNS-rebinding TOCTOU:
+the safety check can see a public A record while the subsequent connect
+resolves to a private IP. Fetches therefore pin the validated IP for the
+TCP connect and send the original hostname in ``Host``.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 from fastapi import HTTPException
@@ -97,8 +102,42 @@ def assert_safe_url(url: str) -> str:
     return url
 
 
+def pin_safe_url(url: str) -> tuple[str, dict[str, str]]:
+    """Validate `url` once and return (connect_url, extra_headers).
+
+    Resolves DNS a single time, rejects any forbidden address in that
+    answer set, then builds a connect URL with an IP literal so httpx does
+    not re-resolve the hostname at connect time (DNS rebinding TOCTOU).
+    `extra_headers` carries ``Host: <original hostname>`` for name-based
+    virtual hosts.
+    """
+    if not isinstance(url, str):
+        raise HTTPException(400, "url must be a string") from None
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(400, f"unsupported url scheme {parsed.scheme!r}; only http/https allowed") from None
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(400, "url has no host") from None
+    ips = _resolve_ips(host)
+    for ip in ips:
+        if _ip_is_forbidden(ip):
+            raise HTTPException(400, "url resolves to a disallowed (private/loopback/reserved) address") from None
+    ip = ips[0]
+    ip_s = str(ip)
+    port = parsed.port
+    if isinstance(ip, ipaddress.IPv6Address):
+        netloc = f"[{ip_s}]" + (f":{port}" if port else "")
+    else:
+        netloc = ip_s + (f":{port}" if port else "")
+    pinned = urlunparse(
+        (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
+    )
+    return pinned, {"Host": host}
+
+
 async def fetch_bytes(url: str) -> tuple[bytes, str]:
-    """Fetch a URL safely: validate every hop, no automatic redirects.
+    """Fetch a URL safely: validate + IP-pin every hop, no automatic redirects.
 
     Returns (content, content_type). Raises HTTPException(400) on any
     validation failure or transport error.
@@ -112,17 +151,17 @@ async def fetch_bytes(url: str) -> tuple[bytes, str]:
         timeout=FETCH_TIMEOUT, follow_redirects=False, headers=headers
     ) as client:
         for _ in range(MAX_REDIRECTS + 1):
-            assert_safe_url(current)
+            pinned, host_hdr = pin_safe_url(current)
             try:
-                r = await client.get(current)
+                r = await client.get(pinned, headers={**headers, **host_hdr})
             except httpx.HTTPError as e:
                 raise HTTPException(400, f"failed to fetch url: {e}") from e
             if r.is_redirect:
                 location = r.headers.get("location")
                 if not location:
                     raise HTTPException(400, "redirect without location header")
-                # Resolve relative redirects against the current URL, then
-                # re-validate on the next loop iteration.
+                # Resolve relative redirects against the logical (pre-pin) URL,
+                # then re-validate + re-pin on the next loop iteration.
                 current = str(httpx.URL(current).join(location))
                 continue
             try:
