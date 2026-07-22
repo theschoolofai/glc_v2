@@ -82,7 +82,11 @@ async def test_fetch_bytes_rejects_redirect_to_private(monkeypatch):
     monkeypatch.setattr(ssrf.socket, "getaddrinfo", fake_gai)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "public.example":
+        # After DNS pin, request.url.host may be an IP literal; the logical
+        # name is carried on the Host header (and, with transport-layer pin,
+        # also remains on the URL host for SNI). Key on Host so either shape works.
+        host = (request.headers.get("host") or request.url.host or "").split(":")[0]
+        if host == "public.example":
             return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/meta-data/"})
         return httpx.Response(200, content=b"SECRET", headers={"content-type": "image/png"})
 
