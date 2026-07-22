@@ -12,10 +12,12 @@ is private / loopback / link-local / reserved (IPv4 *and* IPv6), and
 provides a fetch wrapper that follows redirects manually so every hop is
 re-validated.
 
-Validate-then-``httpx.get(hostname)`` is still a DNS-rebinding TOCTOU:
-the safety check can see a public A record while the subsequent connect
-resolves to a private IP. Fetches therefore pin the validated IP for the
-TCP connect and send the original hostname in ``Host``.
+Validate-then-``httpx.get(hostname)`` is a DNS-rebinding TOCTOU: the
+safety check can see a public A record while the subsequent connect
+resolves to a private IP. Fetches therefore pin the validated IP at the
+**transport/connection** layer while keeping the request URL hostname
+intact so TLS SNI and certificate verification still use the logical
+name (HTTP ``Host`` stays correct as well).
 """
 
 from __future__ import annotations
@@ -23,10 +25,13 @@ from __future__ import annotations
 import base64
 import ipaddress
 import socket
-from urllib.parse import urlparse, urlunparse
+from dataclasses import dataclass
+from urllib.parse import urlparse
 
+import httpcore
 import httpx
 from fastapi import HTTPException
+from httpcore._backends.auto import AutoBackend
 
 # Follow at most this many redirect hops (each re-validated).
 MAX_REDIRECTS = 4
@@ -102,14 +107,21 @@ def assert_safe_url(url: str) -> str:
     return url
 
 
-def pin_safe_url(url: str) -> tuple[str, dict[str, str]]:
-    """Validate `url` once and return (connect_url, extra_headers).
+@dataclass(frozen=True)
+class SafeTarget:
+    """A URL that passed SSRF checks, with the IP to dial for connect."""
 
-    Resolves DNS a single time, rejects any forbidden address in that
-    answer set, then builds a connect URL with an IP literal so httpx does
-    not re-resolve the hostname at connect time (DNS rebinding TOCTOU).
-    `extra_headers` carries ``Host: <original hostname>`` for name-based
-    virtual hosts.
+    url: str
+    hostname: str
+    pinned_ip: str
+
+
+def prepare_safe_target(url: str) -> SafeTarget:
+    """Resolve DNS once, reject forbidden addresses, return connect pin.
+
+    The returned ``url`` keeps the original hostname so httpx uses it for
+    SNI / certificate verification and the HTTP ``Host`` header. ``pinned_ip``
+    is what the transport must dial (closes DNS rebinding TOCTOU).
     """
     if not isinstance(url, str):
         raise HTTPException(400, "url must be a string") from None
@@ -123,17 +135,57 @@ def pin_safe_url(url: str) -> tuple[str, dict[str, str]]:
     for ip in ips:
         if _ip_is_forbidden(ip):
             raise HTTPException(400, "url resolves to a disallowed (private/loopback/reserved) address") from None
-    ip = ips[0]
-    ip_s = str(ip)
-    port = parsed.port
-    if isinstance(ip, ipaddress.IPv6Address):
-        netloc = f"[{ip_s}]" + (f":{port}" if port else "")
-    else:
-        netloc = ip_s + (f":{port}" if port else "")
-    pinned = urlunparse(
-        (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
+    return SafeTarget(url=url, hostname=host, pinned_ip=str(ips[0]))
+
+
+# Back-compat alias used by earlier PR #100 tests / callers.
+def pin_safe_url(url: str) -> tuple[str, dict[str, str]]:
+    """Return (url_with_hostname, Host header). Prefer ``prepare_safe_target``."""
+    target = prepare_safe_target(url)
+    return target.url, {"Host": target.hostname}
+
+
+class _PinningBackend(AutoBackend):
+    """Dial a pinned IP while httpx still names the logical host (SNI/Host)."""
+
+    def __init__(self, pins: dict[str, str]) -> None:
+        super().__init__()
+        self._pins = {h.lower().rstrip("."): ip for h, ip in pins.items()}
+
+    async def connect_tcp(  # type: ignore[override]
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ) -> httpcore.AsyncNetworkStream:
+        key = host.decode() if isinstance(host, (bytes, bytearray)) else str(host)
+        dial = self._pins.get(key.lower().rstrip("."), key)
+        return await super().connect_tcp(
+            dial,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+
+def _pinned_transport(pins: dict[str, str]) -> httpx.AsyncHTTPTransport:
+    """httpx transport whose TCP connect uses pinned IPs (SNI stays on URL host)."""
+    from httpx._config import DEFAULT_LIMITS, create_ssl_context
+
+    transport = httpx.AsyncHTTPTransport()
+    transport._pool = httpcore.AsyncConnectionPool(
+        ssl_context=create_ssl_context(verify=True, cert=None, trust_env=True),
+        max_connections=DEFAULT_LIMITS.max_connections,
+        max_keepalive_connections=DEFAULT_LIMITS.max_keepalive_connections,
+        keepalive_expiry=DEFAULT_LIMITS.keepalive_expiry,
+        http1=True,
+        http2=False,
+        network_backend=_PinningBackend(pins),
     )
-    return pinned, {"Host": host}
+    return transport
 
 
 async def fetch_bytes(url: str) -> tuple[bytes, str]:
@@ -147,32 +199,36 @@ async def fetch_bytes(url: str) -> tuple[bytes, str]:
         "Accept": "image/*,*/*;q=0.8",
     }
     current = url
-    async with httpx.AsyncClient(
-        timeout=FETCH_TIMEOUT, follow_redirects=False, headers=headers
-    ) as client:
-        for _ in range(MAX_REDIRECTS + 1):
-            pinned, host_hdr = pin_safe_url(current)
-            try:
-                r = await client.get(pinned, headers={**headers, **host_hdr})
-            except httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch url: {e}") from e
-            if r.is_redirect:
-                location = r.headers.get("location")
-                if not location:
-                    raise HTTPException(400, "redirect without location header")
-                # Resolve relative redirects against the logical (pre-pin) URL,
-                # then re-validate + re-pin on the next loop iteration.
-                current = str(httpx.URL(current).join(location))
-                continue
-            try:
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch url: {e}") from e
-            content = r.content
-            if len(content) > MAX_IMAGE_BYTES:
-                raise HTTPException(400, "fetched resource exceeds size cap")
-            ctype = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            return content, ctype
+    for _ in range(MAX_REDIRECTS + 1):
+        target = prepare_safe_target(current)
+        transport = _pinned_transport({target.hostname: target.pinned_ip})
+        try:
+            async with httpx.AsyncClient(
+                timeout=FETCH_TIMEOUT,
+                follow_redirects=False,
+                headers=headers,
+                transport=transport,
+            ) as client:
+                # Keep hostname in the URL so TLS SNI + cert verify use it;
+                # the transport dials ``target.pinned_ip`` instead.
+                r = await client.get(target.url)
+        except httpx.HTTPError as e:
+            raise HTTPException(400, f"failed to fetch url: {e}") from e
+        if r.is_redirect:
+            location = r.headers.get("location")
+            if not location:
+                raise HTTPException(400, "redirect without location header")
+            current = str(httpx.URL(current).join(location))
+            continue
+        try:
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(400, f"failed to fetch url: {e}") from e
+        content = r.content
+        if len(content) > MAX_IMAGE_BYTES:
+            raise HTTPException(400, "fetched resource exceeds size cap")
+        ctype = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+        return content, ctype
     raise HTTPException(400, "too many redirects") from None
 
 
