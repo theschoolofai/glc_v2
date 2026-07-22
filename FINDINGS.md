@@ -99,27 +99,34 @@ Full per-adapter PID/minimal-image mesh (Moves 2–4 end state) not complete. Au
 ## Part 2 — new bugs (PR against `theschoolofai/glc_v2`)
 
 PR **required**. Must not restate §6/§7. Must break an eight-invariant. First PR wins.
-Graded so far: **Part 1 500/500 · Part 2 0/500** (empty-verify PR = duplicate of PR #5).
+**Score:** Part 1 **500/500** · Part 2 **100/500** · Total **600/1000** (as of instructor feedback).
 
-### Scored 0 — do not refile
+### Graded
 
-| Attempt | Why 0 |
-|---------|-------|
-| Empty webhook verify (`compare_digest("", "")`) | Duplicate of **PR #5** (first-to-file). Fix valid; points to earliest filer. |
-| WhatsApp Meta HMAC replay / idempotency | **PR #37** already claimed (first-to-file); only control-token split scored there. |
+| PR | Result | Notes |
+|----|--------|-------|
+| Empty webhook verify | **0** | Duplicate of **PR #5** |
+| [#100](https://github.com/theschoolofai/glc_v2/pull/100) SSRF DNS-rebind pin | **+100** | Distinct from #14/#75/#92. Follow-up pushed: Host-keyed test + transport-layer pin (HTTPS SNI). |
+
+### Scored 0 / do not refile
+
+| Attempt | Why |
+|---------|-----|
+| Empty webhook verify | Dup of PR #5 |
+| WhatsApp HMAC replay | Claimed by PR #37 |
 | HTTP / WS channel spoof | §6 C2 / §7 leak 9 |
 
-Close / ignore open duplicate PR #36 (`saitej123:bug_fix` conflicts + duplicate).
+### Filed (awaiting grade)
 
-### File this — Bug B: SSRF DNS-rebinding TOCTOU
+| PR | Branch | Bug | Invariant |
+|----|--------|-----|-----------|
+| [#101](https://github.com/theschoolofai/glc_v2/pull/101) | `part2/twilio-mms-dns-ssrf` | Twilio MMS MediaUrl DNS-blind SSRF | 1 |
+| [#102](https://github.com/theschoolofai/glc_v2/pull/102) | `part2/ratelimit-idle-bucket-evict` | RateLimiter empty-bucket leak under id rotation | 8 |
 
-- **Branch:** `part2/ssrf-dns-rebind-pin` (from `upstream/main` @ `6087d8c`)
-- **Bug:** After C1, `fetch_bytes` still does `assert_safe_url` then `httpx.get(hostname)`. Safety check and TCP connect are different DNS lookups — attacker DNS can answer public then private/metadata (rebinding).
-- **Invariant:** Section 4 **TOCTOU** / confused-deputy egress residual (not the open-SSRF C1 itself — C1 never pinned the connect IP)
-- **Affected:** `glc/security/ssrf.py` `fetch_bytes` / new `pin_safe_url`
-- **Repro:** `repro_ssrf_dns_rebind.sh`, `tests/test_ssrf_dns_rebind.py`
-- **Fix:** Resolve once → pin public IP for connect → send `Host:` original name; re-pin every redirect hop
-- **Commands:** [`SUBMIT.md`](SUBMIT.md)
+### #100 tighten-ups (done on same branch)
+
+1. `tests/test_llm_hardening.py::test_fetch_bytes_rejects_redirect_to_private` keys on `Host` header.
+2. Dial pinned IP via httpcore network backend; keep hostname in URL for TLS SNI/cert verify.
 
 ---
 
