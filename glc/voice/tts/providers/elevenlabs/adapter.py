@@ -27,6 +27,20 @@ from glc.voice.tts.providers.elevenlabs.schemas import ElevenLabsRequest
 
 DEFAULT_VOICE_ID = "eoIFRkuKCeTGYlRFffIU"
 ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+# ElevenLabs voice ids are opaque alphanumeric tokens. Reject path
+# separators / traversal so callers cannot redirect the gateway's
+# xi-api-key onto other api.elevenlabs.io routes (e.g. /v1/user).
+_VOICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_voice_id(voice_id: str) -> str:
+    if not _VOICE_ID_RE.fullmatch(voice_id):
+        raise TTSError(
+            "invalid voice_id: must be 1-64 chars of [A-Za-z0-9_-] "
+            "(path separators and '..' are not allowed)",
+            status=400,
+        )
+    return voice_id
 
 # #71: voice_id is interpolated into the upstream URL. Restrict it to the
 # alphanumeric id charset ElevenLabs actually uses so a value like
@@ -66,11 +80,12 @@ class Provider(TTSProvider):
                 cost_usd=0.0,
             )
 
+        resolved = _validate_voice_id(voice_id or self._voice_id)
         self._check_quota(text)
         chunks = self._chunk_text(text)
         audio_bytes = b""
         for chunk in chunks:
-            audio_bytes += await self._call_upstream(chunk, voice_id or self._voice_id)
+            audio_bytes += await self._call_upstream(chunk, resolved)
         self._persist_real_quota(len(text))
         return SynthesizeResult(
             audio_b64=base64.b64encode(audio_bytes).decode("ascii"),
