@@ -46,7 +46,7 @@ from email.message import EmailMessage
 from typing import Any, Literal
 
 from glc.channels.base import ChannelAdapter
-from glc.channels.catalogue.imap.artifacts import ArtifactStore
+from glc.channels.catalogue.imap.artifacts import ArtifactStore, ArtifactTooLarge
 from glc.channels.catalogue.imap.mime_parser import parse as _mime_parse
 from glc.channels.catalogue.imap.smtp_sender import SmtpSender
 from glc.channels.catalogue.imap.uid_tracker import UidTracker
@@ -54,6 +54,7 @@ from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
 from glc.security.trust_level import classify
 
 _BOT_FROM = "bot@example.com"
+_MAX_ATTACHMENTS_PER_MESSAGE = 20  # cap fan-out per inbound email (invariant 8)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -280,8 +281,15 @@ class Adapter(ChannelAdapter):
         if self.is_public_channel and trust_level == "untrusted":
             return None
 
-        # 5. Store all attachment blobs → art:<sha> refs
-        attachments: list[Attachment] = [self._store_attachment(att) for att in parsed.attachments]
+        # 5. Store attachment blobs → art:<sha> refs. Bound the fan-out per
+        #    message and skip blobs the store rejects as too large, so one
+        #    inbound email can't exhaust disk (invariant 8; ArtifactTooLarge).
+        attachments: list[Attachment] = []
+        for att in parsed.attachments[:_MAX_ATTACHMENTS_PER_MESSAGE]:
+            try:
+                attachments.append(self._store_attachment(att))
+            except ArtifactTooLarge:
+                continue
 
         # 6. Mark UID as processed (live mode only — prevents reprocessing
         #    on reconnect without relying on server-side \Seen flag alone)
