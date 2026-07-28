@@ -73,6 +73,11 @@ ROUTER_PROMPT = (
 
 router = APIRouter()
 
+# Cap /v1/chat prompt size, symmetric with the existing /v1/embed cap
+# (E.MAX_INPUT_CHARS), so an unbounded prompt can't run up paid inference
+# or memory before any provider work starts (invariant 8).
+MAX_CHAT_INPUT_CHARS = 200_000
+
 
 # ─────────────────────────── helpers (verbatim port) ──────────────────────────
 
@@ -496,6 +501,12 @@ async def chat(req: ChatRequest, request: Request):
         )
         for m in messages
     )
+    if len(prompt_text) > MAX_CHAT_INPUT_CHARS:
+        raise HTTPException(
+            413,
+            f"prompt is {len(prompt_text)} chars; /v1/chat input is capped at "
+            f"{MAX_CHAT_INPUT_CHARS} chars. Chunk the input.",
+        )
     est = _est_tokens(messages, system_blocks, req.max_tokens)
     explicit_override = bool(req.provider)
     required_caps = _required_caps(req)

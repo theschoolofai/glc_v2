@@ -181,3 +181,12 @@ def test_transcribe_oversize_audio_returns_413(app_client, monkeypatch):
     big_audio = base64.b64encode(b"\x00" * 5000).decode("ascii")
     r = app_client.post("/v1/transcribe", json={"audio_b64": big_audio, "mime": "audio/wav"})
     assert r.status_code == 413
+
+
+# --- /v1/chat prompt size cap (symmetric with /v1/embed) -----------------
+
+
+def test_chat_rejects_oversized_prompt(app_client):
+    huge_prompt = "x" * (6 * 1024 * 1024)  # ~6MB, well past MAX_CHAT_INPUT_CHARS
+    r = app_client.post("/v1/chat", json={"prompt": huge_prompt})
+    assert r.status_code == 413
