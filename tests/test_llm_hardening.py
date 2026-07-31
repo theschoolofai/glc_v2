@@ -13,7 +13,6 @@ from fastapi import HTTPException
 from glc.routes import chat
 from glc.security import ssrf
 
-
 # ─────────────────────────── SSRF: assert_safe_url ───────────────────────────
 
 

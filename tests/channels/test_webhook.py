@@ -116,8 +116,9 @@ async def test_channel_specific_behaviour_signed_replay_window(mock, pair_owner)
       - reject bodies with an expired `t` timestamp → None
       - accept fresh, correctly-signed bodies       → ChannelMessage
 
-    Adapters that skip the timestamp check leave the webhook endpoint
-    open to replay attacks the moment a body leaks to a log line."""
+    Adapters that skip the timestamp or duplicate-event check leave the
+    webhook endpoint open to replay attacks the moment a body leaks to a log
+    line."""
     adapter = Adapter(config={"mock": mock})
 
     raw, headers = mock.queue_unsigned(text="no signature")
@@ -130,3 +131,4 @@ async def test_channel_specific_behaviour_signed_replay_window(mock, pair_owner)
     out = await adapter.on_message({"raw_body": raw, "headers": headers})
     assert isinstance(out, ChannelMessage)
     assert out.text == "fresh"
+    assert await adapter.on_message({"raw_body": raw, "headers": headers}) is None

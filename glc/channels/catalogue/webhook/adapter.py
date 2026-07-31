@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import threading
 import time
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -24,6 +25,26 @@ from glc.security.trust_level import classify
 
 # Stripe-style webhooks reject bodies older than five minutes (replay window).
 REPLAY_WINDOW_SECONDS = 300
+MAX_REPLAY_CACHE = 4096
+
+_seen_replay_keys: dict[str, float] = {}
+_seen_replay_lock = threading.Lock()
+
+
+def _consume_replay_key(key: str, expires_at: float) -> bool:
+    """Return True once for a signed event; False for a fresh-window replay."""
+    now = time.time()
+    with _seen_replay_lock:
+        expired = [k for k, exp in _seen_replay_keys.items() if exp <= now]
+        for k in expired:
+            del _seen_replay_keys[k]
+        if key in _seen_replay_keys:
+            return False
+        if len(_seen_replay_keys) >= MAX_REPLAY_CACHE:
+            oldest = min(_seen_replay_keys, key=_seen_replay_keys.get)
+            del _seen_replay_keys[oldest]
+        _seen_replay_keys[key] = expires_at
+        return True
 
 
 class Adapter(ChannelAdapter):
@@ -48,7 +69,11 @@ class Adapter(ChannelAdapter):
             return False
         signed = f"{ts}.{raw_body.decode('utf-8', 'replace')}".encode()
         expected = hmac.new(secret.encode(), signed, sha256).hexdigest()
-        return hmac.compare_digest(expected, received)
+        if not hmac.compare_digest(expected, received):
+            return False
+        body_digest = sha256(raw_body).hexdigest()
+        replay_key = sha256(f"{ts}.{received}.{body_digest}".encode()).hexdigest()
+        return _consume_replay_key(replay_key, int(ts) + REPLAY_WINDOW_SECONDS)
 
     async def on_message(self, raw: Any) -> ChannelMessage:
         mock = self.config.get("mock")

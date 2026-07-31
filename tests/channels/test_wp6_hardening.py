@@ -24,7 +24,6 @@ import pytest
 
 from glc.security.pairing import get_pairing_store
 
-
 # ──────────────────────────────────────────────────────────────────
 # #8 — IMAP: forged From stays untrusted
 # ──────────────────────────────────────────────────────────────────
