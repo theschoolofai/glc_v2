@@ -173,7 +173,7 @@ class Provider(STTProvider):
             ssl_ctx.verify_mode = ssl.CERT_NONE
 
         try:
-            async with websockets.connect(url, max_size=None, ssl=ssl_ctx) as ws:
+            async with websockets.connect(url, max_size=16 * 1024 * 1024, ssl=ssl_ctx) as ws:
                 # 1. setup must be the first frame
                 await ws.send(json.dumps(self._build_setup_frame()))
                 # 2. push the audio, then close the input turn
