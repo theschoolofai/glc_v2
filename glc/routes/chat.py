@@ -993,4 +993,5 @@ async def routers(request: Request):
 
 @router.get("/v1/calls")
 async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
+    limit = min(max(limit, 1), 1000)
     return db.recent(limit=limit, provider=provider, status=status)
