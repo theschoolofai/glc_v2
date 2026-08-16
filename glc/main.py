@@ -42,26 +42,43 @@ PORT = int(os.getenv("GLC_PORT", "8111"))
 # it also covers routes owned by other route modules (chat.py, control-plane
 # listings) without editing those files.
 #
-# Auth is FAIL CLOSED: if GLC_API_TOKEN is unset, protected routes return 503
-# rather than running open to the public internet.
+# Auth is FAIL CLOSED in two senses:
+#
+#  1. If GLC_API_TOKEN is unset, protected routes return 503 rather than
+#     running open to the public internet.
+#  2. The gate is DENY BY DEFAULT over the /v1 surface. It used to carry a
+#     hand-maintained allowlist of exact protected paths, which silently
+#     failed open for any /v1 route missing from it: `/v1/routers` is
+#     registered in chat.py and was never added to the set, so it served the
+#     provider inventory, live per-provider quota consumption, and every
+#     configured rate/token ceiling to unauthenticated callers, while its
+#     sibling `/v1/status` correctly returned 401. Enumerating what to
+#     protect makes forgetting the default; enumerating what to exempt makes
+#     protecting the default, so a route added later is covered on arrival.
 
-_DATA_PLANE_PATHS = {
-    "/v1/chat",
-    "/v1/chat/batch",
-    "/v1/embed",
-    "/v1/vision",
-    "/v1/speak",
-    "/v1/transcribe",
-}
-_INFO_PATHS = {
-    "/v1/status",
-    "/v1/providers",
-    "/v1/capabilities",
-    "/v1/cost/by_agent",
-    "/v1/calls",
-    "/v1/embedders",
-}
-_PROTECTED_PATHS = _DATA_PLANE_PATHS | _INFO_PATHS
+# Unauthenticated by design: liveness probe and the landing page.
+_PUBLIC_PATHS = {"/", "/healthz"}
+
+# Route families carrying their OWN, separate authentication, which must not
+# be gated by the data-plane token:
+#   /v1/control/*   operator control token, see glc/routes/control.py
+#   /v1/channels/*  install token on the WS; the GET webhook is the platform
+#                   verification handshake, compared against
+#                   <NAME>_VERIFY_TOKEN in glc/routes/channels.py
+_SELF_AUTHENTICATED_PREFIXES = (
+    "/v1/control/",
+    "/v1/channels/",
+)
+
+
+def _requires_edge_auth(path: str) -> bool:
+    """Deny by default across /v1. True if `path` must present the data-plane
+    bearer token."""
+    if path in _PUBLIC_PATHS:
+        return False
+    if path.startswith(_SELF_AUTHENTICATED_PREFIXES):
+        return False
+    return path == "/v1" or path.startswith("/v1/")
 
 
 def _extract_bearer(request: Request) -> str:
@@ -133,7 +150,7 @@ async def _edge_auth_gate(request: Request, call_next):
     env var is unset the gate FAILS CLOSED (503) so a fresh deployment is
     never publicly callable by accident. /healthz and / stay public.
     """
-    if request.url.path in _PROTECTED_PATHS:
+    if _requires_edge_auth(request.url.path):
         expected = os.getenv("GLC_API_TOKEN", "").strip()
         if not expected:
             return JSONResponse(
