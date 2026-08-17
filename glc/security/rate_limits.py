@@ -20,6 +20,10 @@ from dataclasses import dataclass, field
 class _Window:
     messages: deque[float] = field(default_factory=deque)
     tool_calls: deque[float] = field(default_factory=deque)
+    # Timestamp of the most recent admitted request in either bucket. When
+    # this is older than the sliding horizon the whole window is expired and
+    # the entry can be dropped without inspecting either deque.
+    last_seen: float = 0.0
 
 
 def _gc(dq: deque[float], horizon: float) -> None:
@@ -37,6 +41,25 @@ class RateLimiter:
     # traffic is unaffected while a flood of rotated ids is still capped.
     CHANNEL_CEILING_MULTIPLIER = 10
 
+    # The #43 ceiling caps how many requests a rotating attacker gets THROUGH.
+    # It does not cap how much state they leave BEHIND. `_gc()` trims the
+    # timestamps inside a window; nothing used to remove the window itself, so
+    # every distinct channel_user_id ever seen leaked one _Window for the life
+    # of the process. Worse, the window was allocated by setdefault() *before*
+    # the ceiling was evaluated, so a caller being correctly rejected on every
+    # single request still allocated on every single request. Measured: 200k
+    # rotated ids retained 200k windows and 339 MiB, accumulated entirely while
+    # the limiter was returning 429 (invariant 8).
+    #
+    # Three changes close it. Windows are looked up, not created, before the
+    # ceilings are evaluated, so a rejected request allocates nothing. Expired
+    # windows are swept on a timer. And the key space carries a hard ceiling,
+    # past which the least-recently-active window is evicted rather than the
+    # table being allowed to grow.
+    MAX_TRACKED_USERS = 50_000
+    MAX_TRACKED_CHANNELS = 1_024
+    SWEEP_INTERVAL_SECONDS = 60.0
+
     def __init__(
         self,
         default_mpm: int = 30,
@@ -53,6 +76,7 @@ class RateLimiter:
         # Channel-wide windows, keyed only on channel name.
         self._channel_state: dict[str, _Window] = {}
         self._lock = threading.Lock()
+        self._last_sweep = 0.0
 
     def configure_from_yaml(self, channels_yaml: dict) -> None:
         defaults = (channels_yaml or {}).get("defaults", {}).get("rate_limits", {})
@@ -107,28 +131,85 @@ class RateLimiter:
     def check_tool_call(self, channel: str, user_id: str) -> tuple[bool, str]:
         return self._check(channel, user_id, "tool_calls")
 
+    # -- key-space bookkeeping ---------------------------------------------
+    # Callers hold self._lock for all three helpers.
+
+    def _sweep(self, horizon: float) -> None:
+        """Drop every window whose most recent request has fallen out of the
+        sliding horizon. Such a window is fully expired, so both deques would
+        gc to empty anyway and the entry carries no quota."""
+        for store in (self._state, self._channel_state):
+            expired = [k for k, w in store.items() if w.last_seen < horizon]
+            for k in expired:
+                del store[k]
+
+    def _maybe_sweep(self, now: float, horizon: float) -> None:
+        if now - self._last_sweep >= self.SWEEP_INTERVAL_SECONDS:
+            self._last_sweep = now
+            self._sweep(horizon)
+
+    def _make_room(self, store: dict, limit: int, horizon: float) -> None:
+        """Ensure `store` can take one more key without exceeding `limit`.
+        Sweeps first; if the table is still full, every remaining window is
+        live, so evict the least-recently-active one. Eviction only forgives
+        quota already earned, it never grants more than the caps allow, and
+        it keeps the table bounded without rejecting a legitimate new
+        identity (which would hand the attacker a denial of service of its
+        own)."""
+        if len(store) < limit:
+            return
+        self._sweep(horizon)
+        while len(store) >= limit:
+            victim = min(store, key=lambda k: store[k].last_seen)
+            del store[victim]
+
     def _check(self, channel: str, user_id: str, kind: str) -> tuple[bool, str]:
         mpm, tpm = self.limits_for(channel)
         cap = mpm if kind == "messages" else tpm
         cmpm, ctpm = self.channel_limits_for(channel)
         ccap = cmpm if kind == "messages" else ctpm
+        messages = kind == "messages"
         with self._lock:
             now = time.time()
             horizon = now - 60
-            win = self._state.setdefault((channel, user_id), _Window())
-            dq = win.messages if kind == "messages" else win.tool_calls
-            _gc(dq, horizon)
-            cwin = self._channel_state.setdefault(channel, _Window())
-            cdq = cwin.messages if kind == "messages" else cwin.tool_calls
-            _gc(cdq, horizon)
+            self._maybe_sweep(now, horizon)
+
+            # LOOK UP, do not create. A caller who is about to be rejected
+            # must not leave a _Window behind: that was the whole bug.
+            win = self._state.get((channel, user_id))
+            dq = None
+            if win is not None:
+                dq = win.messages if messages else win.tool_calls
+                _gc(dq, horizon)
+
+            cwin = self._channel_state.get(channel)
+            cdq = None
+            if cwin is not None:
+                cdq = cwin.messages if messages else cwin.tool_calls
+                _gc(cdq, horizon)
+
             # Evaluate both ceilings before mutating either window, so a
-            # rejection never consumes quota in the other bucket.
-            if len(dq) >= cap:
+            # rejection never consumes quota in the other bucket. An absent
+            # window counts as zero requests in the current horizon.
+            if dq is not None and len(dq) >= cap:
                 return False, f"{kind} limit {cap}/min exceeded for ({channel}, {user_id})"
-            if len(cdq) >= ccap:
+            if cdq is not None and len(cdq) >= ccap:
                 return False, f"{kind} channel limit {ccap}/min exceeded for '{channel}'"
+
+            # Admitted. Allocate now, keeping both key spaces bounded.
+            if win is None:
+                self._make_room(self._state, self.MAX_TRACKED_USERS, horizon)
+                win = self._state[(channel, user_id)] = _Window()
+                dq = win.messages if messages else win.tool_calls
+            if cwin is None:
+                self._make_room(self._channel_state, self.MAX_TRACKED_CHANNELS, horizon)
+                cwin = self._channel_state[channel] = _Window()
+                cdq = cwin.messages if messages else cwin.tool_calls
+
             dq.append(now)
             cdq.append(now)
+            win.last_seen = now
+            cwin.last_seen = now
             return True, ""
 
 
