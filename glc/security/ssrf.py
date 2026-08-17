@@ -98,7 +98,28 @@ def assert_safe_url(url: str) -> str:
 
 
 async def fetch_bytes(url: str) -> tuple[bytes, str]:
-    """Fetch a URL safely: validate every hop, no automatic redirects.
+    """Fetch a URL safely: validate every hop, no automatic redirects, and
+    enforce MAX_IMAGE_BYTES *while streaming* rather than after the fact.
+
+    The size cap used to be a post-hoc check on ``r.content``. A
+    non-streaming ``client.get()`` reads the entire response body into
+    memory before returning, so the guard rejected an oversized resource
+    only once the process had already paid for it: a 200 MiB body pushed
+    peak memory past 400 MiB before raising 400. A caller who supplies an
+    image URL pointing at a host they control could therefore drive the
+    gateway container out of memory with a single ``/v1/vision`` request,
+    and on Modal, where the gateway runs ``max_containers=1`` so the
+    hash-chained audit log has a single writer, that is a whole-gateway
+    denial of service, taking the audit writer down with it (invariant 8).
+
+    This streams the body and aborts the moment the running total exceeds
+    the cap, so the bytes we refuse to accept are never buffered. It is the
+    same pattern ``_read_body_capped()`` in glc/routes/channels.py already
+    applies to inbound webhook bodies (finding #42); the outbound fetch
+    never received it. The declared ``Content-Length`` is checked first so
+    an honest oversized response is rejected before a single body byte is
+    read, and because ``aiter_bytes()`` yields *decoded* bytes, a
+    compressed decompression bomb is measured at its true expanded size.
 
     Returns (content, content_type). Raises HTTPException(400) on any
     validation failure or transport error.
@@ -114,26 +135,35 @@ async def fetch_bytes(url: str) -> tuple[bytes, str]:
         for _ in range(MAX_REDIRECTS + 1):
             assert_safe_url(current)
             try:
-                r = await client.get(current)
+                async with client.stream("GET", current) as r:
+                    if r.is_redirect:
+                        location = r.headers.get("location")
+                        if not location:
+                            raise HTTPException(400, "redirect without location header")
+                        # Resolve relative redirects against the current URL,
+                        # then re-validate on the next loop iteration. The
+                        # body of a redirect is never read.
+                        current = str(httpx.URL(current).join(location))
+                        continue
+                    if r.status_code >= 400:
+                        raise HTTPException(400, f"failed to fetch url: HTTP {r.status_code}")
+                    # Reject an honestly-declared oversized body before we
+                    # read any of it.
+                    declared = r.headers.get("content-length")
+                    if declared and declared.isdigit() and int(declared) > MAX_IMAGE_BYTES:
+                        raise HTTPException(400, "fetched resource exceeds size cap")
+                    # A lying or absent Content-Length is caught here: stop at
+                    # the first chunk that crosses the cap. Nothing beyond
+                    # MAX_IMAGE_BYTES is ever held in memory.
+                    buf = bytearray()
+                    async for chunk in r.aiter_bytes():
+                        buf += chunk
+                        if len(buf) > MAX_IMAGE_BYTES:
+                            raise HTTPException(400, "fetched resource exceeds size cap")
+                    ctype = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+                    return bytes(buf), ctype
             except httpx.HTTPError as e:
                 raise HTTPException(400, f"failed to fetch url: {e}") from e
-            if r.is_redirect:
-                location = r.headers.get("location")
-                if not location:
-                    raise HTTPException(400, "redirect without location header")
-                # Resolve relative redirects against the current URL, then
-                # re-validate on the next loop iteration.
-                current = str(httpx.URL(current).join(location))
-                continue
-            try:
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch url: {e}") from e
-            content = r.content
-            if len(content) > MAX_IMAGE_BYTES:
-                raise HTTPException(400, "fetched resource exceeds size cap")
-            ctype = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            return content, ctype
     raise HTTPException(400, "too many redirects") from None
 
 
