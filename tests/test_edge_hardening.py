@@ -181,3 +181,12 @@ def test_transcribe_oversize_audio_returns_413(app_client, monkeypatch):
     big_audio = base64.b64encode(b"\x00" * 5000).decode("ascii")
     r = app_client.post("/v1/transcribe", json={"audio_b64": big_audio, "mime": "audio/wav"})
     assert r.status_code == 413
+
+
+# --- router token estimator: whitespace-free/CJK undercount --------------
+
+
+def test_estimator_not_fooled_by_whitespace_free_input():
+    from glc.routes.chat import _estimate_tokens
+
+    assert _estimate_tokens("字" * 40000) > 8000

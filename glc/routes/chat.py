@@ -79,7 +79,7 @@ router = APIRouter()
 
 
 def _estimate_tokens(text: str) -> int:
-    return int(len(text.split()) * 1.4)
+    return max(int(len(text.split()) * 1.4), len(text) // 4)
 
 
 def _build_sample(text: str) -> str:
