@@ -115,21 +115,61 @@ class RateLimiter:
         with self._lock:
             now = time.time()
             horizon = now - 60
-            win = self._state.setdefault((channel, user_id), _Window())
+            # Drop idle buckets. #43 added a channel-wide ceiling so rotated
+            # ids can no longer bypass the rate, but every rejected probe still
+            # used to `setdefault` a permanent empty `_Window` — unbounded
+            # memory growth under identity rotation.
+            self._evict_idle(horizon)
+
+            key = (channel, user_id)
+            win = self._state.get(key)
+            if win is None:
+                win = _Window()
             dq = win.messages if kind == "messages" else win.tool_calls
             _gc(dq, horizon)
-            cwin = self._channel_state.setdefault(channel, _Window())
+
+            cwin = self._channel_state.get(channel)
+            if cwin is None:
+                cwin = _Window()
             cdq = cwin.messages if kind == "messages" else cwin.tool_calls
             _gc(cdq, horizon)
+
             # Evaluate both ceilings before mutating either window, so a
             # rejection never consumes quota in the other bucket.
             if len(dq) >= cap:
                 return False, f"{kind} limit {cap}/min exceeded for ({channel}, {user_id})"
             if len(cdq) >= ccap:
                 return False, f"{kind} channel limit {ccap}/min exceeded for '{channel}'"
+
+            # Only retain buckets that actually accepted traffic.
+            self._state[key] = win
+            self._channel_state[channel] = cwin
             dq.append(now)
             cdq.append(now)
             return True, ""
+
+    def _evict_idle(self, horizon: float) -> None:
+        """Remove per-user / per-channel windows with no timestamps in-window."""
+        stale_users = [
+            key
+            for key, win in self._state.items()
+            if self._window_idle(win, horizon)
+        ]
+        for key in stale_users:
+            del self._state[key]
+        stale_channels = [
+            ch
+            for ch, win in self._channel_state.items()
+            if self._window_idle(win, horizon)
+        ]
+        for ch in stale_channels:
+            del self._channel_state[ch]
+
+    @staticmethod
+    def _window_idle(win: _Window, horizon: float) -> bool:
+        _gc(win.messages, horizon)
+        _gc(win.tool_calls, horizon)
+        return not win.messages and not win.tool_calls
 
 
 _limiter: RateLimiter | None = None
