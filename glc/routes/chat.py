@@ -782,9 +782,9 @@ async def chat(req: ChatRequest, request: Request):
                 session=req.session,
                 retries=retries,
             )
-            tag = f"failed: {str(e)[:100]}"
+            tag = "upstream error"
             if secs > 0:
-                tag += f" → backoff {secs:.0f}s ({reason})"
+                tag += f" → backoff {secs:.0f}s"
             all_attempts.append({"provider": name, "reason": tag})
             if explicit_override or not getattr(e, "retryable", True):
                 # Detail already persisted via db.log_call above (C4 #26).
@@ -811,7 +811,7 @@ async def chat(req: ChatRequest, request: Request):
                 session=req.session,
                 retries=retries,
             )
-            all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
+            all_attempts.append({"provider": name, "reason": "internal error"})
             if explicit_override:
                 # Detail already persisted via db.log_call above (C4 #26).
                 raise HTTPException(502, f"provider '{name}' upstream error")
