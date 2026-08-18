@@ -275,6 +275,13 @@ def by_agent(session=None, since=None):
 
 
 def recent(limit=100, provider=None, status=None):
+    # NEW-BUG-1 FIX: Enforce maximum limit to prevent resource exhaustion
+    MAX_LIMIT = 10000
+    if not isinstance(limit, int) or limit < 1:
+        limit = 100  # Default to safe value for invalid inputs
+    elif limit > MAX_LIMIT:
+        limit = MAX_LIMIT  # Cap at maximum
+
     q = "SELECT * FROM calls"
     where, args = [], []
     if provider:
