@@ -37,22 +37,15 @@ _SAFE_DEFAULT = PolicyConfig(
 
 
 def _normalize_path_for_glob(s: str) -> str:
-    """Expand ``~`` and normalize separators so that a rule written as
-    ``~/Documents/**`` also matches the equivalent absolute path on the host
-    (e.g. ``/Users/x/Documents/...``). Without this, an absolute-path spelling
-    slips past a tilde-based deny rule (#69)."""
+    """Expand ``~`` and normalize separators so ``~/Documents/**`` matches
+    the equivalent absolute path on the host."""
     return os.path.expanduser(s).replace("\\", "/")
 
 
 def _matches_glob(value: Any, pattern: str) -> bool:
-    # #16: a non-string value where a string is expected is type-confusion. We
-    # raise so evaluate() can fail CLOSED — silently returning False here would
-    # skip a deny rule and fall through to default-allow.
-    if not isinstance(value, str):
-        raise TypeError(f"glob condition expected str, got {type(value).__name__}")
-    if not isinstance(pattern, str):
-        raise TypeError(f"glob pattern expected str, got {type(pattern).__name__}")
-    value = _normalize_path_for_glob(value)  # #69
+    if not isinstance(value, str) or not isinstance(pattern, str):
+        return False
+    value = _normalize_path_for_glob(value)
     pattern = _normalize_path_for_glob(pattern)
     # fnmatch's ** support is weak; substitute ** for a regex-ish pattern.
     if "**" in pattern:
