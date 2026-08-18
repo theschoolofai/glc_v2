@@ -598,9 +598,22 @@ async def chat(req: ChatRequest, request: Request):
                                 yield f"data: {json.dumps({'provider': name, 'delta': chunk})}\n\n"
                         text = "".join(agg)
                         latency = int((time.time() - t0) * 1000)
+                        # Meter streamed usage against the budget + ledger.
+                        # provider.stream() surfaces no token counts, so estimate
+                        # them (same estimator the router uses). Without this a
+                        # stream=true call records 0 tokens: it bypasses the TPM /
+                        # daily-token caps (routing.RateState.can_use sums
+                        # tokens_minute / tokens_today) and reads as 0 in the cost
+                        # ledger. Mirrors the non-stream path's token accounting.
+                        est_in = _estimate_tokens(prompt_text)
+                        est_out = _estimate_tokens(text)
+                        rtr.state[name].tokens_today += est_in + est_out
+                        rtr.state[name].tokens_minute.append((time.time(), est_in + est_out))
                         db.log_call(
                             provider=name,
                             model=req.model or provider.model,
+                            input_tokens=est_in,
+                            output_tokens=est_out,
                             latency_ms=latency,
                             status="ok",
                             prompt_chars=len(prompt_text),
