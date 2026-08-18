@@ -1,45 +1,68 @@
-"""CF-2 — JSON schema bomb fix.
+"""CF-2 — JSON schema bomb (#25).
 
-Verifies that _validate_structured():
-  - rejects self-referential $ref schemas immediately
-  - rejects excessively deep schemas immediately
-  - enforces a 2-second timeout on slow validators
-  - passes valid schemas normally
+These tests arrived with PR #25, written against that branch's own validator,
+which raised ``ValueError`` and enforced a wall-clock timeout through a thread
+pool. The consolidated implementation on ``main`` bounds the schema up front in
+``assert_schema_sane()`` and rejects with ``HTTPException(400)`` instead, so a
+bomb never reaches the validator and no timeout is needed. The assertions below
+target that behaviour.
+
+The pool/timeout test from the original file is deliberately not carried over:
+``main`` has no ``_VALIDATOR_POOL`` to exercise.
 """
 
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 
 def test_cf2_self_ref_raises_immediately():
-    """A $ref: '#' schema must be rejected before validation starts."""
+    """A ``$ref: '#'`` schema must be rejected before validation starts."""
     from glc.routes.chat import _validate_structured
 
-    bomb = {"$ref": "#"}
-    with pytest.raises(ValueError, match="self-referential"):
-        _validate_structured('{"x": 1}', bomb)
+    with pytest.raises(HTTPException, match="self-referential") as ei:
+        _validate_structured('{"x": 1}', {"$ref": "#"})
+    assert ei.value.status_code == 400
 
 
 def test_cf2_nested_self_ref_raises():
-    """A deeply-nested self-referential schema must also be caught."""
+    """A nested self-referential ``$ref`` must also be caught.
+
+    This shape is small enough to clear both the depth and the node cap, so it
+    is the case that proves the pointer is rejected by value rather than by
+    the structural bounds.
+    """
     from glc.routes.chat import _validate_structured
 
-    bomb = {"properties": {"a": {"$ref": "#"}}}
-    with pytest.raises(ValueError, match="self-referential"):
-        _validate_structured('{"a": 1}', bomb)
+    with pytest.raises(HTTPException, match="self-referential") as ei:
+        _validate_structured('{"a": 1}', {"properties": {"a": {"$ref": "#"}}})
+    assert ei.value.status_code == 400
 
 
 def test_cf2_depth_limit_raises():
-    """A schema nested beyond 12 levels must be rejected."""
-    from glc.routes.chat import _validate_structured
+    """A schema nested past MAX_SCHEMA_DEPTH must be rejected."""
+    from glc.routes.chat import MAX_SCHEMA_DEPTH, _validate_structured
 
-    # Build a schema 15 levels deep
     deep: dict = {"type": "string"}
-    for _ in range(15):
+    for _ in range(MAX_SCHEMA_DEPTH + 5):
         deep = {"properties": {"x": deep}}
-    with pytest.raises(ValueError, match="nesting depth"):
-        _validate_structured('{}', deep)
+    with pytest.raises(HTTPException, match="too deeply nested") as ei:
+        _validate_structured("{}", deep)
+    assert ei.value.status_code == 400
+
+
+def test_cf2_ordinary_ref_still_allowed():
+    """Only root-pointing refs are bombs; a normal ``$defs`` ref must survive."""
+    from glc.routes.chat import assert_schema_sane
+
+    assert_schema_sane(
+        {
+            "type": "object",
+            "properties": {"n": {"$ref": "#/$defs/pos"}},
+            "$defs": {"pos": {"type": "integer", "minimum": 0}},
+        }
+    )
 
 
 def test_cf2_valid_schema_passes():
@@ -51,8 +74,10 @@ def test_cf2_valid_schema_passes():
         "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
         "required": ["name"],
     }
-    result = _validate_structured('{"name": "Alice", "age": 30}', schema)
-    assert result == {"name": "Alice", "age": 30}
+    assert _validate_structured('{"name": "Alice", "age": 30}', schema) == {
+        "name": "Alice",
+        "age": 30,
+    }
 
 
 def test_cf2_invalid_json_raises():
@@ -66,35 +91,9 @@ def test_cf2_invalid_json_raises():
 def test_cf2_schema_mismatch_raises_validation_error():
     """A JSON value that violates the schema must raise jsonschema.ValidationError."""
     from jsonschema import ValidationError
+
     from glc.routes.chat import _validate_structured
 
     schema = {"type": "object", "properties": {"count": {"type": "integer"}}, "required": ["count"]}
     with pytest.raises(ValidationError):
         _validate_structured('{"count": "not-an-int"}', schema)
-
-
-def test_cf2_timeout_raises(monkeypatch):
-    """A validator that exceeds the timeout must raise ValueError about timeout."""
-    import concurrent.futures
-    from glc.routes import chat as chat_mod
-
-    original_timeout = chat_mod._SCHEMA_VALIDATE_TIMEOUT
-    monkeypatch.setattr(chat_mod, "_SCHEMA_VALIDATE_TIMEOUT", 0.001)
-
-    # A moderately complex allOf schema that takes non-trivial time
-    # Monkeypatching timeout to near-zero ensures the timeout path is exercised
-    import time
-
-    original_submit = chat_mod._VALIDATOR_POOL.submit
-
-    def slow_submit(fn, *args, **kwargs):
-        def delayed(*a, **kw):
-            time.sleep(0.05)
-            return fn(*a, **kw)
-        return original_submit(delayed, *args, **kwargs)
-
-    monkeypatch.setattr(chat_mod._VALIDATOR_POOL, "submit", slow_submit)
-
-    schema = {"type": "object"}
-    with pytest.raises(ValueError, match="timed out"):
-        chat_mod._validate_structured('{}', schema)

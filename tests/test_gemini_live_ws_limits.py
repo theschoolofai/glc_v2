@@ -5,8 +5,6 @@ allowing a compromised or misbehaving upstream to send arbitrarily
 large frames and exhaust gateway memory (invariant #8).
 """
 
-import ast
-import inspect
 from pathlib import Path
 
 

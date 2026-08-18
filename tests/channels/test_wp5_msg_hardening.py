@@ -319,8 +319,13 @@ async def test_whatsapp_rejects_unsigned_meta_entry(monkeypatch):
     mock = WhatsappMock()
     adapter = Adapter(config={"mock": mock})
     # Bare Meta `entry` dict (no signature) — the old HMAC-bypass shape.
-    forged = mock.queue_owner_message("forged")
+    # queue_owner_message() now returns a *signed* envelope, so the unsigned
+    # shape this test exists to reject comes from queue_unsigned_meta_dict().
+    forged = mock.queue_unsigned_meta_dict("forged")
     assert await adapter.on_message(forged) is None
+    # And the signed path still works, so the assertion above is about the
+    # missing signature rather than the adapter rejecting everything.
+    assert await adapter.on_message(mock.queue_owner_message("ok")) is not None
 
 
 @pytest.mark.asyncio

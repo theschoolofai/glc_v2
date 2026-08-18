@@ -7,7 +7,6 @@ error messages — leaking provider error structures, rate limit details,
 and API key validity information.
 """
 
-from glc.routes.chat import _sanitize_for_retry
 
 
 def test_attempted_reasons_are_generic():

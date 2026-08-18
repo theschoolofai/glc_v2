@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-from glc.channels.envelope import ChannelMessage
 from glc.audit import query as audit_query
+from glc.channels.envelope import ChannelMessage
 
 
 def _write_channels_yaml(body: str) -> None:

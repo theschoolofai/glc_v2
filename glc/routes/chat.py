@@ -11,7 +11,6 @@ regress them — tests in test_v9_compat.py assert behaviour shape.
 from __future__ import annotations
 
 import asyncio as _asyncio
-import concurrent.futures
 import json
 import os
 import time
@@ -301,6 +300,35 @@ def _routing_text(messages: list[dict[str, Any]], system_blocks: Any) -> str:
     return system_text or msg_text
 
 
+def _image_block_charcost(b: dict) -> int:
+    """Estimate the char-equivalent cost of an image block from its ACTUAL
+    payload size (#83). A flat per-image constant lets a multi-MB inline
+    image undercount and slip past the max_ctx / router size gate. We base
+    the estimate on the embedded byte size; base64 inflates ~4/3, so we
+    scale the decoded length. A small floor keeps tiny/thumbnail images
+    from scoring zero.
+    """
+    payload_len = 0
+    btype = b.get("type")
+    if btype == "image_url":
+        iu = b.get("image_url")
+        url = iu.get("url") if isinstance(iu, dict) else iu
+        if isinstance(url, str):
+            payload_len = len(url)
+    elif btype in ("image", "input_image"):
+        src = b.get("source") or {}
+        if isinstance(src, dict) and src.get("data"):
+            payload_len = len(str(src.get("data")))
+        else:
+            url = b.get("url") or (src.get("url") if isinstance(src, dict) else None)
+            if isinstance(url, str):
+                payload_len = len(url)
+    # Decode base64/data-url overhead back to raw bytes, then map bytes to a
+    # char-equivalent so it flows through the existing `chars // 4` token math.
+    decoded_bytes = int(payload_len * 3 / 4)
+    return max(1200, decoded_bytes)
+
+
 def _est_tokens(messages, system_blocks, max_tokens):
     chars = 0
     for m in messages:
@@ -454,6 +482,13 @@ def assert_schema_sane(schema: Any, _depth: int = 0, _counter: list[int] | None 
     if _counter[0] > MAX_SCHEMA_NODES:
         raise HTTPException(400, "response_format.schema too large")
     if isinstance(schema, dict):
+        # The depth and node caps only bound schemas that are *structurally*
+        # large. A ``$ref`` pointing back at the document root is small enough
+        # to pass both caps and still make Draft202012Validator recurse until
+        # the interpreter dies, so the pointer has to be rejected by value.
+        ref = schema.get("$ref")
+        if isinstance(ref, str) and ref.strip() in ("#", "#/"):
+            raise HTTPException(400, "response_format.schema contains a self-referential $ref")
         for v in schema.values():
             assert_schema_sane(v, _depth + 1, _counter)
     elif isinstance(schema, list):
