@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 from glc.audit import store
 from glc.audit.store import _conn, _resolve_path, append, init_store, verify_chain
 
@@ -53,7 +51,7 @@ def test_prev_hash_links_to_previous_row():
     _seed(3)
     with _conn() as c:
         rows = c.execute("SELECT prev_hash, row_hash FROM audit_log ORDER BY id").fetchall()
-    for earlier, later in zip(rows, rows[1:]):
+    for earlier, later in zip(rows, rows[1:], strict=False):
         assert later["prev_hash"] == earlier["row_hash"]
 
 
