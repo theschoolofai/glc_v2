@@ -475,8 +475,12 @@ def _sanitize_for_retry(text: str) -> str:
         text = str(text)
     if len(text) > _MAX_RETRY_ECHO:
         text = text[:_MAX_RETRY_ECHO] + "…[truncated]"
-    # Break up code fences and role-injection style markers.
+    # Break up code fences, data-zone delimiters, and role-injection markers.
     text = text.replace("```", "``​`")
+    text = text.replace(">>>", ">>​>")
+    text = text.replace("<<<", "<<​<")
+    text = text.replace("\nHuman:", "\nHuman​:")
+    text = text.replace("\nAssistant:", "\nAssistant​:")
     return text
 
 
