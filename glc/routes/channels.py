@@ -299,9 +299,8 @@ async def channel_webhook(name: str, request: Request):
     # #10/#48/#77A: re-derive trust server-side here too.
     msg = msg.with_server_trust(derive_trust_level(msg.channel, msg.channel_user_id))
 
-    # #47: public-ness is derived from config, not from the message metadata.
-    is_public = _is_public_channel(name)
-    was_mentioned = bool((msg.metadata or {}).get("was_mentioned", False)) and is_public
+    # #47: mention gate derived server-side; caller metadata ignored (same as WS path).
+    is_public, was_mentioned = _derive_gate(name, msg)
 
     ok, why = allowed(
         msg.channel,
