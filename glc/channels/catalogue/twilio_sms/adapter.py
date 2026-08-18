@@ -54,12 +54,11 @@ def _is_twilio_media_host(host: str) -> bool:
 
 
 def _is_blocked_host(host: str) -> bool:
-    """SSRF guard: block loopback/private/link-local/reserved targets.
+    """Fast reject for literal private IPs and obvious internal names.
 
-    Blocks the obvious internal hostnames and any host given as a literal
-    IP in a non-public range. Public hostnames pass (DNS-rebinding is out
-    of scope for a static allowlist, but private literals are the common
-    MediaUrl SSRF vector)."""
+    Hostname resolution (including DNS that maps a public name to a private
+    address) is enforced in ``_download_media`` via ``assert_safe_url``.
+    """
     h = (host or "").strip().lower().rstrip(".")
     if not h or h == "localhost" or h.endswith(".localhost") or h.endswith(".internal"):
         return True
@@ -348,10 +347,17 @@ class Adapter(ChannelAdapter):
 
           - reject non-http(s) schemes and SSRF-prone hosts (loopback,
             private, link-local, reserved, literal-IP internal ranges);
+          - resolve the hostname and reject any private/link-local answer
+            (closes DNS names that map to metadata / RFC1918 — the previous
+            guard only checked literal IPs and left hostnames DNS-blind);
           - attach the account's Basic-Auth credentials ONLY when the host
             is a genuine Twilio media host — never to third-party hosts;
           - do not follow redirects (a 3xx could bounce creds off-Twilio).
         """
+        from fastapi import HTTPException
+
+        from glc.security.ssrf import assert_safe_url
+
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             raise ValueError(f"refusing non-http(s) media URL: {url!r}")
@@ -360,6 +366,10 @@ class Adapter(ChannelAdapter):
             raise ValueError(f"media URL has no host: {url!r}")
         if _is_blocked_host(host):
             raise ValueError(f"refusing SSRF-prone media host: {host!r}")
+        try:
+            assert_safe_url(url)
+        except HTTPException as e:
+            raise ValueError(f"refusing SSRF-prone media URL: {url!r}") from e
 
         auth: tuple[str, str] | None = None
         if _is_twilio_media_host(host):
